@@ -102,34 +102,42 @@ struct pcb_t *get_mlq_proc(void)
     return proc;
 }
 
-void put_mlq_proc(struct pcb_t * proc) {
-	proc->krnl->ready_queue = &ready_queue;
-	proc->krnl->mlq_ready_queue = mlq_ready_queue;
-	proc->krnl->running_list = &running_list;
+void put_mlq_proc(struct pcb_t *proc)
+{
+    if (proc == NULL || proc->krnl == NULL)
+        return;
 
-	/* TODO: put running proc to running_list
-	 *       It worth to protect by a mechanism.
-	 *
-	 */
+    if (proc->prio >= MAX_PRIO)
+        return;
 
-	pthread_mutex_lock(&queue_lock);
-	enqueue(&mlq_ready_queue[proc->prio], proc);
-	pthread_mutex_unlock(&queue_lock);
+    pthread_mutex_lock(&queue_lock);
+
+    proc->krnl->ready_queue = &ready_queue;
+    proc->krnl->mlq_ready_queue = mlq_ready_queue;
+    proc->krnl->running_list = &running_list;
+
+    enqueue(&mlq_ready_queue[proc->prio], proc);
+
+    pthread_mutex_unlock(&queue_lock);
 }
 
-void add_mlq_proc(struct pcb_t * proc) {
-	proc->krnl->ready_queue = &ready_queue;
-	proc->krnl->mlq_ready_queue = mlq_ready_queue;
-	proc->krnl->running_list = &running_list;
+void add_mlq_proc(struct pcb_t *proc)
+{
+    if (proc == NULL || proc->krnl == NULL)
+        return;
 
-	/* TODO: put running proc to running_list
-	 *       It worth to protect by a mechanism.
-	 *
-	 */
+    if (proc->prio >= MAX_PRIO)
+        return;
 
-	pthread_mutex_lock(&queue_lock);
-	enqueue(&mlq_ready_queue[proc->prio], proc);
-	pthread_mutex_unlock(&queue_lock);
+    pthread_mutex_lock(&queue_lock);
+
+    proc->krnl->ready_queue = &ready_queue;
+    proc->krnl->mlq_ready_queue = mlq_ready_queue;
+    proc->krnl->running_list = &running_list;
+
+    enqueue(&mlq_ready_queue[proc->prio], proc);
+
+    pthread_mutex_unlock(&queue_lock);
 }
 
 struct pcb_t * get_proc(void) {
