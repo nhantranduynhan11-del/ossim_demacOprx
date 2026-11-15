@@ -1,0 +1,24 @@
+# Build artifacts
+/obj/
+/os
+/mem
+/sched
+/dma_testbench
+*.o
+*.vcd
+
+# Generated syscall table
+/src/syscalltbl.lst
+
+# Logs and local test results
+*.log
+/test_results/
+/output/
+
+# Temporary and editor files
+*.swp
+*.swo
+*~
+
+# Local experimental input
+/input/khoi_syscall_8K
