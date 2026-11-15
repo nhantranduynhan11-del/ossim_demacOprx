@@ -692,17 +692,22 @@ int init_mm(struct mm_struct *mm, struct pcb_t *caller)
     return -1;
 
   /* user processes start at VA 0, the kernel mm at the kernel base */
-  base = (caller == NULL) ? (addr_t)KERNEL_BASE_ADDR : 0;
+base = (caller == NULL) ? (addr_t)KERNEL_BASE_ADDR : 0;
 
-  /* By default the owner comes with at least one vma */
-  vma0->vm_id = 0;
-  vma0->vm_start = base;
-  vma0->vm_end = vma0->vm_start;
-  vma0->sbrk = vma0->vm_start;
-  vma0->vm_freerg_list = NULL;
-  first_rg = init_vm_rg(vma0->vm_start, vma0->vm_end);
-  enlist_vm_rg_node(&vma0->vm_freerg_list, first_rg);
+vma0->vm_id = 0;
+vma0->vm_start = base;
 
+/* Test-only: 16 MiB virtual address limit for user processes */
+vma0->vm_end = (caller == NULL)
+             ? base
+             : (addr_t)0x01000000ULL;
+
+vma0->sbrk = vma0->vm_start;
+vma0->vm_freerg_list = NULL;
+
+/* Only memory below sbrk may be reused */
+first_rg = init_vm_rg(vma0->vm_start, vma0->sbrk);
+enlist_vm_rg_node(&vma0->vm_freerg_list, first_rg);
   /* update VMA0 next */
   vma0->vm_next = NULL;
 

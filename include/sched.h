@@ -17,6 +17,7 @@ int queue_empty(void);
 
 void init_scheduler(void);
 void finish_scheduler(void);
+void finish_proc(struct pcb_t *proc);
 
 /* Get the next process from ready queue */
 struct pcb_t * get_proc(void);
@@ -27,6 +28,7 @@ void put_proc(struct pcb_t * proc);
 /* Add a new process to ready queue */
 void add_proc(struct pcb_t * proc);
 
+struct pcb_t *find_running_proc_by_pid(uint32_t pid, struct krnl_t *krnl);
 #ifdef __cplusplus
 }
 #endif
