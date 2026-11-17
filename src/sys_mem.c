@@ -62,8 +62,12 @@ int __sys_memmap(struct krnl_t *krnl,
                               regs->a2,
                               regs->a3);
 
+
     case SYSMEM_IO_READ:
-        if (krnl->mram == NULL)
+        if (krnl->mram == NULL ||
+            krnl->mram->storage == NULL ||
+            krnl->mram->maxsz <= 0 ||
+            regs->a2 >= (addr_t)krnl->mram->maxsz)
             return -1;
 
         if (MEMPHY_read(krnl->mram,
@@ -75,12 +79,15 @@ int __sys_memmap(struct krnl_t *krnl,
         return 0;
 
     case SYSMEM_IO_WRITE:
-        if (krnl->mram == NULL)
+        if (krnl->mram == NULL ||
+            krnl->mram->storage == NULL ||
+            krnl->mram->maxsz <= 0 ||
+            regs->a2 >= (addr_t)krnl->mram->maxsz)
             return -1;
 
         return MEMPHY_write(krnl->mram,
                             regs->a2,
-                            regs->a3);
+                            (BYTE)regs->a3);
 
     default:
         return -1;

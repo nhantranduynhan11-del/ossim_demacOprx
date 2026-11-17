@@ -214,8 +214,16 @@ int MEMPHY_put_freefp(struct memphy_struct *mp, addr_t fpn)
  */
 int init_memphy(struct memphy_struct *mp, addr_t max_size, int randomflg)
 {
+   if (mp == NULL)
+      return -1;
+
+   mp->free_fp_list = NULL;
+   mp->used_fp_list = NULL;
+
    mp->storage = (BYTE *)malloc(max_size * sizeof(BYTE));
    mp->maxsz = max_size;
+   if (mp->storage == NULL)
+      return -1;
    memset(mp->storage, 0, max_size * sizeof(BYTE));
 
 #ifdef MM64

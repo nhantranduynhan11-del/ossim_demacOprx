@@ -32,6 +32,13 @@ static int num_cpus;
 static int done = 0;
 static struct krnl_t os;
 
+static pthread_mutex_t dma_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t dma_cond = PTHREAD_COND_INITIALIZER;
+
+static int dma_init_done = 0;
+static int dma_init_ok = 0;
+static int dma_stop_requested = 0;
+
 #ifdef MM_PAGING
 static unsigned long memramsz;
 static unsigned long memswpsz[PAGING_MAX_MMSWP];
@@ -121,22 +128,39 @@ static void * cpu_routine(void * args) {
 	pthread_exit(NULL);
 }
 
-
-static void * co_processor(void *arg) {
+static void *co_processor(void *arg)
+{
     (void)arg;
-    /* TODO: Initialize the internal Verilator RTL simulation.
-	 *       This is necessary to ensure that the RTL simulation is ready for DPI calls.
-      */
-    if (rtl_dma_init_simulation() != 0) {
-        printf("Cannot initialize RTL simulation\n");
-        return (void*)1;
+    int rc = rtl_dma_init_simulation();
+
+    pthread_mutex_lock(&dma_mutex);
+
+    dma_init_ok = (rc == 0);
+    dma_init_done = 1;
+
+    pthread_cond_broadcast(&dma_cond);
+    pthread_mutex_unlock(&dma_mutex);
+
+    if (rc != 0) {
+        fprintf(stderr, "[DMA] RTL initialization failed\n");
+        rtl_dma_cleanup_simulation();
+        return NULL;
     }
-	
-	/* TODO: This asynchronous implementation of DMA
-     *        DMA completion callback is not yet implemented in this testbench
-     */
-    // Install callback handler
-    //dma_done_callback();  // Call the callback to signal DMA completion
+
+    printf("[DMA] co-processor ready\n");
+
+    pthread_mutex_lock(&dma_mutex);
+
+    while (!dma_stop_requested) {
+        pthread_cond_wait(&dma_cond, &dma_mutex);
+    }
+
+    pthread_mutex_unlock(&dma_mutex);
+
+    rtl_dma_cleanup_simulation();
+
+    printf("[DMA] co-processor stopped\n");
+
     return NULL;
 }
 
@@ -315,7 +339,33 @@ int main(int argc, char * argv[]) {
 	/* Init scheduler */
 	init_scheduler();
 
+    /* Start co-processor before CPU and loader */
+    if (pthread_create(dma, NULL, co_processor, NULL) != 0) {
+        fprintf(stderr, "[DMA] Cannot create co-processor thread\n");
+        stop_timer();
+        return 1;
+    }
+
+    /* Wait until RTL initialization succeeds or fails */
+    pthread_mutex_lock(&dma_mutex);
+
+    while (!dma_init_done) {
+        pthread_cond_wait(&dma_cond, &dma_mutex);
+    }
+
+    int dma_ready = dma_init_ok;
+
+    pthread_mutex_unlock(&dma_mutex);
+
+    if (!dma_ready) {
+        pthread_join(*dma, NULL);
+        fprintf(stderr, "[DMA] OS startup aborted\n");
+        stop_timer();
+        return 1;
+    }
+
 	/* Run CPU and loader */
+
 #ifdef MM_PAGING
 	pthread_create(&ld, NULL, ld_routine, (void*)mm_ld_args);
 #else
@@ -326,20 +376,36 @@ int main(int argc, char * argv[]) {
 			cpu_routine, (void*)&args[i]);
 	}
 
-	/* Run co-processor */
-	pthread_create(dma, NULL, co_processor, NULL);
+    /* Wait for CPU and loader finishing */
+    for (i = 0; i < num_cpus; i++) {
+        pthread_join(cpu[i], NULL);
+    }
 
-	/* Wait for CPU and loader finishing */
-	for (i = 0; i < num_cpus; i++) {
-		pthread_join(cpu[i], NULL);
-	}
-	pthread_join(ld, NULL);
+    pthread_join(ld, NULL);
 
-	/* Stop timer */
-	stop_timer();
+    /* Request co-processor shutdown */
+    pthread_mutex_lock(&dma_mutex);
 
-	return 0;
+    dma_stop_requested = 1;
+    pthread_cond_broadcast(&dma_cond);
 
+    pthread_mutex_unlock(&dma_mutex);
+
+    /* Wait until RTL cleanup finishes */
+    pthread_join(*dma, NULL);
+
+    /* Stop timer */
+    stop_timer();
+
+    free(cpu);
+    free(dma);
+    free(args);
+
+#ifdef MM_PAGING
+    free(mm_ld_args);
+#endif
+
+    return 0;
 }
 
 
