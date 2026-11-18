@@ -224,11 +224,10 @@ int liballoc(struct pcb_t *proc, addr_t size, uint32_t reg_index)
     return -1;
   }
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
   printf("PHYSICAL MEMORY AFTER ALLOCATION\n");
-  printf("liballoc: allocated %d bytes at 0x%08x for reg_index %d\n", size, addr, reg_index);
+  printf("liballoc: allocated %llu bytes at 0x%11x for reg_index %u\n", (unsigned long long)size, (unsigned long long)addr, reg_index);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
   MEMPHY_dump(proc->krnl->mram);
 #endif
@@ -250,17 +249,16 @@ int libfree(struct pcb_t *proc, uint32_t reg_index)
   {
     return -1;
   }
-printf("%s:%d\n",__func__,__LINE__);
+
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
   printf("PHYSICAL MEMORY AFTER FREEING\n");
-  printf("libfree: freed memory for reg_index %d\n", reg_index);
+  printf("libfree: freed memory for reg_index %u\n", reg_index);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
   MEMPHY_dump(proc->krnl->mram);
 #endif
-  return 0;//val;
+  return 0;
 }
 
 /*pg_getpage - get the page in ram
@@ -459,16 +457,20 @@ int libread(
     addr_t offset,    // Source address = [source] + [offset]
     uint32_t* destination)
 {
-  BYTE data;
-printf("%s:%d\n",__func__,__LINE__);
+  BYTE data = 0;
   int val = __read(proc, 0, source, offset, &data);
+  if(val == -1)
+  {
+    return -1;
+  }
 
   *destination = data;
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
+  printf("read region=%u offset=%llu value=%u\n", source, (unsigned long long)offset, data);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
+  MEMPHY_dump(proc->krnl->mram);
 #endif
 
   return val;
@@ -521,10 +523,11 @@ int libwrite(
     return -1;
   }
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
+  printf("write region=%u offset=%llu value=%u\n", destination, (unsigned long long)offset, data);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
+  MEMPHY_dump(proc->krnl->mram);
 #endif
 
   return val;
