@@ -43,6 +43,20 @@ size_t memory_bank_get_size(void);
 // Check if memory bank is initialized
 int memory_bank_is_available(void);
 
+// Bind the DMA system bus to the OS physical RAM.
+int sysbus_bind_os_ram(uint8_t *storage, size_t size);
+
+// Detach RAM after all DMA transfers have stopped.
+void sysbus_unbind_os_ram(void);
+
+// Error status for the active DMA transfer.
+void sysbus_reset_dma_error(void);
+int sysbus_get_dma_error(void);
+
+// Completion notification raised by the RTL callback.
+void sysbus_reset_dma_completion(void);
+int sysbus_get_dma_completion(void);
+
 // DPI Callback: Called from RTL when DMA read access
 int dpi_bank_read32_legacy(long long offset);
 

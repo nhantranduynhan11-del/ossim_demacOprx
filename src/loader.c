@@ -114,6 +114,7 @@ struct pcb_t * load(const char * path) {
 			exit(1);
 		}
 	}
+        fclose(file);
 	return proc;
 }
 

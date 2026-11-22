@@ -53,6 +53,30 @@ extern "C" int dpi_rtl_dma_is_available(void);
  * length: number of bytes to copy
  */
 int dpi_dma_copy(struct pcb_t *caller, uint64_t src_offset, uint64_t dst_offset, uint64_t length) {
+
+#if DMA_MAIN == 0
+    /*
+     * OS mode: source and destination must already be validated
+     * physical bus addresses.
+     *
+     * Only the DMA co-processor worker may call this path.
+     * The CPU must submit a request asynchronously instead.
+     */
+    (void)caller;
+
+    if (length == 0 || !dpi_rtl_dma_is_available())
+        return -1;
+
+    sysbus_reset_dma_error();
+
+    int result = dpi_rtl_dma_copy(src_offset, dst_offset, length);
+
+    if (result != 0 || sysbus_get_dma_error() != 0)
+        return -1;
+
+    return 0;
+#else
+
     void *src = NULL;
     void *dst = NULL;
     //struct krnl_t *krnl = caller->krnl;
@@ -77,7 +101,7 @@ int dpi_dma_copy(struct pcb_t *caller, uint64_t src_offset, uint64_t dst_offset,
 
     uint8_t* psrc = (uint8_t*)src;
     uint64_t pattern_length = (length <= 255) ? length : 255;
-    
+
     for (uint64_t i = 0; i < length; i++) {
         // Pattern cycles through 0x01 to min(length, 255)
         psrc[i] = (uint8_t)((i % pattern_length) + 1);
@@ -102,10 +126,10 @@ int dpi_dma_copy(struct pcb_t *caller, uint64_t src_offset, uint64_t dst_offset,
            ((uint8_t*)dst)[6], ((uint8_t*)dst)[7]);
 
     printf("\nCalling RTL DMA...\n");
-    
+
     // Call the RTL DMA function directly with provided parameters
     int result = dpi_rtl_dma_copy(src_offset, dst_offset, length);
-    
+
     printf("\nAfter copy:\n");
     printf("  src[0] = 0x%02x, src[1] = 0x%02x\n"
            "  src[2] = 0x%02x, src[3] = 0x%02x\n"
@@ -123,8 +147,9 @@ int dpi_dma_copy(struct pcb_t *caller, uint64_t src_offset, uint64_t dst_offset,
            ((uint8_t*)dst)[2], ((uint8_t*)dst)[3],
            ((uint8_t*)dst)[4], ((uint8_t*)dst)[5],
            ((uint8_t*)dst)[6], ((uint8_t*)dst)[7]);
-    
+
     return result;
+#endif
 }
 
 /*
@@ -172,7 +197,7 @@ int main(int argc, char** argv) {
         destination = strtoull(argv[2], NULL, 0);
         length = strtoull(argv[3], NULL, 0);
     }
-    
+
     printf("Running dma_testbench source=0x%llx, destination=0x%llx, length=%llu\n",
            (unsigned long long)source, (unsigned long long)destination, (unsigned long long)length);
 
@@ -203,6 +228,31 @@ int main(int argc, char** argv) {
     caller->pid = 0;  // Set a default PID
 
     int result = do_dma(caller, source, destination, length);
+
+
+    // Verify that RTL copied the entire requested buffer.
+    size_t bank_size = memory_bank_get_size();
+
+    if (length == 0 ||
+        source >= bank_size ||
+        destination >= bank_size ||
+        length > bank_size - source ||
+        length > bank_size - destination) {
+        fprintf(stderr, "[DMA TEST] Invalid memory range\n");
+        result = 1;
+    } else if (result == 0) {
+        const void *src_ptr = memory_bank_get_ptr(source);
+        const void *dst_ptr = memory_bank_get_ptr(destination);
+
+        if (src_ptr == NULL || dst_ptr == NULL ||
+            memcmp(src_ptr, dst_ptr, (size_t)length) != 0) {
+            fprintf(stderr, "[DMA TEST] FAIL: Data mismatch\n");
+            result = 1;
+        } else {
+            printf("[DMA TEST] PASS: All %llu bytes match\n",
+                   (unsigned long long)length);
+        }
+    }
 
     // Cleanup
     free(caller->krnl->active_mswp);

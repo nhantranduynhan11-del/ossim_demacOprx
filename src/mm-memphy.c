@@ -68,9 +68,11 @@ int MEMPHY_seq_read(struct memphy_struct *mp, addr_t addr, BYTE *value)
  */
 int MEMPHY_read(struct memphy_struct *mp, addr_t addr, BYTE *value)
 {
-   if (mp == NULL)
+   if (mp == NULL || value == NULL ||
+       mp->storage == NULL ||
+       mp->maxsz <= 0 ||
+       addr >= (addr_t)mp->maxsz)
       return -1;
-
    if (mp->rdmflg)
       *value = mp->storage[addr];
    else /* Sequential access device */
@@ -108,9 +110,11 @@ int MEMPHY_seq_write(struct memphy_struct *mp, addr_t addr, BYTE value)
  */
 int MEMPHY_write(struct memphy_struct *mp, addr_t addr, BYTE data)
 {
-   if (mp == NULL)
+   if (mp == NULL ||
+       mp->storage == NULL ||
+       mp->maxsz <= 0 ||
+       addr >= (addr_t)mp->maxsz)
       return -1;
-
    if (mp->rdmflg)
       mp->storage[addr] = data;
    else /* Sequential access device */
@@ -196,17 +200,23 @@ int MEMPHY_dump(struct memphy_struct *mp)
    return 0;
 }
 
+
 int MEMPHY_put_freefp(struct memphy_struct *mp, addr_t fpn)
 {
-   struct framephy_struct *fp = mp->free_fp_list;
-   struct framephy_struct *newnode = malloc(sizeof(struct framephy_struct));
+    struct framephy_struct *newnode;
 
-   /* Create new node with value fpn */
-   newnode->fpn = fpn;
-   newnode->fp_next = fp;
-   mp->free_fp_list = newnode;
+    if (mp == NULL)
+        return -1;
 
-   return 0;
+    newnode = malloc(sizeof(*newnode));
+    if (newnode == NULL)
+        return -1;
+
+    newnode->fpn = fpn;
+    newnode->fp_next = mp->free_fp_list;
+    mp->free_fp_list = newnode;
+
+    return 0;
 }
 
 /*

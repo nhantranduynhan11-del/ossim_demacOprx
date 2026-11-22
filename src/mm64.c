@@ -45,6 +45,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include "dma.h"
 
 #if defined(MM64)
 
@@ -370,6 +371,134 @@ addr_t pte_get_entry(struct mm_struct *mm, addr_t pgn, struct pcb_t *caller)
   return val;
 }
 
+
+/*
+ * Atomically translate and pin a resident user page
+ * with respect to MM64 page-table operations using
+ * pgtbl_lock.
+ *
+ * This does not yet protect against every eviction/free
+ * path; those paths must obey the same pinning protocol.
+ */
+int mm64_dma_pin_user_page(struct pcb_t *caller,
+                           addr_t user_va,
+                           uint64_t *physical_addr)
+{
+    addr_t *pte;
+    uint64_t fpn;
+    uint64_t pa;
+    uint64_t ram_size;
+    int ret = -1;
+
+    if (caller == NULL ||
+        caller->mm == NULL ||
+        caller->krnl == NULL ||
+        caller->krnl->mram == NULL ||
+        physical_addr == NULL)
+        return -1;
+
+    /* MM64 user addresses must be canonical. */
+    if (!PAGING64_IS_CANONICAL(user_va) ||
+        PAGING64_IS_KERNEL_ADDR(user_va))
+        return -1;
+
+    /* User addresses occupy the lower canonical half. */
+    if (((uint64_t)user_va >> 56) != 0)
+        return -1;
+
+    ram_size = (uint64_t)caller->krnl->mram->maxsz;
+
+    if (ram_size < PAGING64_PAGESZ)
+        return -1;
+
+    pthread_mutex_lock(&pgtbl_lock);
+
+    /*
+     * Internal MM64 lookup. Do not allocate page tables.
+     * Argument order: mm, caller, pgn, alloc.
+     */
+    pte = pgtbl_find_pte(caller->mm,
+                         caller,
+                         PAGING64_PGN(user_va),
+                         0);
+
+    if (pte == NULL || !PAGING_PAGE_PRESENT(*pte))
+        goto out;
+
+    fpn = PAGING_FPN(*pte);
+
+    /* Ensure that the entire physical frame fits RAM. */
+    if (fpn > (ram_size - PAGING64_PAGESZ) /
+              PAGING64_PAGESZ)
+        goto out;
+
+    pa = PAGING64_PHYADDR(fpn, PAGING64_OFFST(user_va));
+
+    /*
+     * Pin while the page-table lock is still held.
+     * Do not call pte_get_entry() here.
+     */
+    if (dma_pin_frame(fpn) != 0)
+        goto out;
+
+    *physical_addr = pa;
+    ret = 0;
+
+out:
+    pthread_mutex_unlock(&pgtbl_lock);
+    return ret;
+}
+
+#ifdef MM64
+int mm64_dma_pin_kernel_page(struct pcb_t *caller,
+                             addr_t kernel_va,
+                             uint64_t *physical_addr)
+{
+    addr_t *pte;
+    addr_t fpn;
+    uint64_t pa;
+    int ret = -1;
+
+    if (caller == NULL ||
+        caller->krnl == NULL ||
+        caller->krnl->mm == NULL ||
+        caller->krnl->mram == NULL ||
+        physical_addr == NULL ||
+        !PAGING64_IS_KERNEL_ADDR(kernel_va))
+        return -1;
+
+    pthread_mutex_lock(&pgtbl_lock);
+
+    /* Look up the existing PTE; do not allocate a new page table. */
+    pte = pgtbl_find_pte(caller->krnl->mm,
+                         caller,
+                         PAGING64_PGN(kernel_va),
+                         0);
+
+    if (pte == NULL || !PAGING_PAGE_PRESENT(*pte))
+        goto unlock;
+
+    fpn = PAGING_FPN(*pte);
+
+    pa = (uint64_t)fpn * PAGING64_PAGESZ +
+         PAGING64_OFFST(kernel_va);
+
+    if (pa >= (uint64_t)caller->krnl->mram->maxsz)
+        goto unlock;
+
+    /* Pin before releasing the page-table lock. */
+    if (dma_pin_frame(fpn) != 0)
+        goto unlock;
+
+    *physical_addr = pa;
+    ret = 0;
+
+unlock:
+    pthread_mutex_unlock(&pgtbl_lock);
+    return ret;
+}
+#endif
+
 /* Set PTE page table entry
  * @caller : caller
  * @pgn    : page number
@@ -521,23 +650,35 @@ addr_t alloc_pages_range(struct pcb_t *caller, int req_pgnum, struct framephy_st
   mram = caller->krnl->mram;
 
   pthread_mutex_lock(&pgtbl_lock);
-  for (pgit = 0; pgit < req_pgnum; pgit++)
-  {
-    if (MEMPHY_get_freefp(mram, &fpn) != 0)
-      break; /* RAM exhausted */
 
+for (pgit = 0; pgit < req_pgnum; pgit++)
+{
+    /*
+     * Allocate the bookkeeping node first.
+     * Do not remove a RAM frame until this succeeds.
+     */
     newfp_str = malloc(sizeof(struct framephy_struct));
+    if (newfp_str == NULL)
+        break;
+
+    if (MEMPHY_get_freefp(mram, &fpn) != 0)
+    {
+        free(newfp_str);
+        break;
+    }
+
     newfp_str->fpn = fpn;
     newfp_str->owner = caller->mm;
     newfp_str->fp_next = NULL;
 
-    /* keep the frames in allocation order */
+    /* Keep frames in allocation order. */
     if (tail == NULL)
-      head = newfp_str;
+        head = newfp_str;
     else
-      tail->fp_next = newfp_str;
+        tail->fp_next = newfp_str;
+
     tail = newfp_str;
-  }
+}
 
   if (pgit < req_pgnum)
   { /* ERROR CODE of obtaining somes but not enough frames: roll back */
@@ -638,26 +779,42 @@ addr_t vm_map_ram(struct pcb_t *caller, addr_t astart, addr_t aend, addr_t mapst
  * @mpdst  : destination memphy
  * @dstfpn : destination physical page number (FPN)
  **/
+
+
 int __swap_cp_page(struct memphy_struct *mpsrc, addr_t srcfpn,
                    struct memphy_struct *mpdst, addr_t dstfpn)
 {
-  int cellidx;
-  addr_t addrsrc, addrdst;
+    const addr_t pagesz = PAGING64_PAGESZ;
 
-  if (mpsrc == NULL || mpdst == NULL)
-    return -1;
+    if (mpsrc == NULL || mpdst == NULL ||
+        mpsrc->storage == NULL || mpdst->storage == NULL ||
+        mpsrc->maxsz <= 0 || mpdst->maxsz <= 0)
+        return -1;
 
-  for (cellidx = 0; cellidx < PAGING64_PAGESZ; cellidx++)
-  {
-    addrsrc = srcfpn * PAGING64_PAGESZ + cellidx;
-    addrdst = dstfpn * PAGING64_PAGESZ + cellidx;
+    /*
+     * Validate complete frame ranges before reading or writing.
+     * Division avoids overflow when calculating frame offsets.
+     */
+    if (srcfpn >= (addr_t)mpsrc->maxsz / pagesz ||
+        dstfpn >= (addr_t)mpdst->maxsz / pagesz)
+        return -1;
 
-    BYTE data;
-    MEMPHY_read(mpsrc, addrsrc, &data);
-    MEMPHY_write(mpdst, addrdst, data);
-  }
+    addr_t srcbase = srcfpn * pagesz;
+    addr_t dstbase = dstfpn * pagesz;
 
-  return 0;
+    if (pagesz > (addr_t)mpsrc->maxsz - srcbase ||
+        pagesz > (addr_t)mpdst->maxsz - dstbase)
+        return -1;
+
+    for (addr_t i = 0; i < pagesz; i++) {
+        BYTE data;
+
+        if (MEMPHY_read(mpsrc, srcbase + i, &data) != 0 ||
+            MEMPHY_write(mpdst, dstbase + i, data) != 0)
+            return -1;
+    }
+
+    return 0;
 }
 
 /*
@@ -782,13 +939,20 @@ int enlist_vm_rg_node(struct vm_rg_struct **rglist, struct vm_rg_struct *rgnode)
 
 int enlist_pgn_node(struct pgn_t **plist, addr_t pgn)
 {
-  struct pgn_t *pnode = malloc(sizeof(struct pgn_t));
+    struct pgn_t *pnode;
 
-  pnode->pgn = pgn;
-  pnode->pg_next = *plist;
-  *plist = pnode;
+    if (plist == NULL)
+        return -1;
 
-  return 0;
+    pnode = malloc(sizeof(struct pgn_t));
+    if (pnode == NULL)
+        return -1;
+
+    pnode->pgn = pgn;
+    pnode->pg_next = *plist;
+    *plist = pnode;
+
+    return 0;
 }
 
 int print_list_fp(struct framephy_struct *ifp)

@@ -1,0 +1,8 @@
+1 7
+alloc 100 1
+kmalloc 100 2
+dma_memcpy 1 2 99 8
+kmalloc 100 4
+copy_from_user 1 4 0 4
+copy_to_user 4 1 0 4
+calc

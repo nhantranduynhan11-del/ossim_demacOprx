@@ -104,6 +104,18 @@
 /* @Role B - extra 5-level paging services */
 int init_krnl_pgtbl(struct krnl_t *krnl);
 int free_pcb_pgtbl(struct pcb_t *caller);
+/*
+ * Resolve and pin one resident user page.
+ *
+ * On success, caller must later unpin the frame using
+ * dma_unpin_frame(physical_addr / PAGING64_PAGESZ).
+ */
+int mm64_dma_pin_user_page(struct pcb_t *caller,
+                           addr_t user_va,
+                           uint64_t *physical_addr);
+int mm64_dma_pin_kernel_page(struct pcb_t *caller,
+                             addr_t kernel_va,
+                             uint64_t *physical_addr);
 int print_pgtbl_stat(struct mm_struct *mm, uint32_t pid);
 uint64_t pgtbl_size_bytes(struct mm_struct *mm);
 

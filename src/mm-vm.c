@@ -48,10 +48,19 @@ struct vm_area_struct *get_vma_by_num(struct mm_struct *mm, int vmaid)
   return pvma;
 }
 
-int __mm_swap_page(struct pcb_t *caller, addr_t vicfpn , addr_t swpfpn)
+int __mm_swap_page(struct pcb_t *caller,
+                   addr_t vicfpn,
+                   addr_t swpfpn)
 {
-    __swap_cp_page(caller->krnl->mram, vicfpn, caller->krnl->active_mswp, swpfpn);
-    return 0;
+    if (caller == NULL || caller->krnl == NULL ||
+        caller->krnl->mram == NULL ||
+        caller->krnl->active_mswp == NULL)
+        return -1;
+
+    return __swap_cp_page(caller->krnl->mram,
+                          vicfpn,
+                          caller->krnl->active_mswp,
+                          swpfpn);
 }
 
 /*get_vm_area_node - get vm area for a number of pages

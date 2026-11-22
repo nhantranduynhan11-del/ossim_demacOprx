@@ -1,0 +1,9 @@
+1 8
+alloc 100 1
+kmalloc 100 2
+write 65 1 0
+write 66 1 1
+write 67 1 2
+write 68 1 3
+dma_memcpy 1 2 0 4
+calc

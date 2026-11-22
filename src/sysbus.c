@@ -30,6 +30,57 @@ typedef struct {
 static memory_bank_t_struct g_banks[MAX_MEMORY_BANKS] = {0};
 static int g_bank_count = 0;
 
+// Physical RAM exposed to the OS DMA bus.
+static uint8_t *g_os_ram = NULL;
+static size_t g_os_ram_size = 0;
+
+// Accessed by the DMA simulation thread.
+static int g_dma_bus_error = 0;
+
+void sysbus_reset_dma_error(void)
+{
+    g_dma_bus_error = 0;
+}
+
+int sysbus_get_dma_error(void)
+{
+    return g_dma_bus_error;
+}
+
+
+/*
+ * Completion state for the active RTL transfer.
+ * Only the co-processor thread may drive the RTL.
+ */
+static int g_dma_completion_seen = 0;
+
+void sysbus_reset_dma_completion(void)
+{
+    g_dma_completion_seen = 0;
+}
+
+int sysbus_get_dma_completion(void)
+{
+    return g_dma_completion_seen;
+}
+
+int sysbus_bind_os_ram(uint8_t *storage, size_t size)
+{
+    if (storage == NULL || size == 0)
+        return -1;
+
+    g_os_ram = storage;
+    g_os_ram_size = size;
+
+    return 0;
+}
+
+void sysbus_unbind_os_ram(void)
+{
+    g_os_ram = NULL;
+    g_os_ram_size = 0;
+}
+
 // Initialize a memory bank with given size in bytes
 memory_bank_t memory_bank_init(size_t size_bytes) {
     // Find first free slot
@@ -115,44 +166,93 @@ extern "C" {
 /**
  * DPI Callback: Called from RTL when DMA read access
  */
-int dpi_bank_read32_legacy(long long offset) {
-    uint8_t data[4] = {0};
 
-    void* src = memory_bank_get_ptr((size_t)offset);
 
-    //printf("MEM READ RESULT: Address=%p, DPI return=%x, Readback=%x, Match=%d\n",
-    //        (void*)((size_t)offset), *(unsigned int*)data, *(unsigned int*)data, 1);
-    //fflush(stdout);
-    
-    memcpy(&data, src, 4);
+int dpi_bank_read32_legacy(long long offset)
+{
+    uint8_t *base = NULL;
+    size_t size = 0;
+    uint32_t value = 0;
+    uint64_t addr;
 
-    return  *((uint32_t*)data);
+    if (g_os_ram != NULL) {
+        base = g_os_ram;
+        size = g_os_ram_size;
+    } else if (memory_bank_is_available()) {
+        base = (uint8_t *)memory_bank_get_ptr(0);
+        size = memory_bank_get_size();
+    }
+
+    if (offset < 0 || base == NULL) {
+        fprintf(stderr, "[DMA BUS] Invalid read source\n");
+        g_dma_bus_error = 1;
+        return 0;
+    }
+
+    addr = (uint64_t)offset;
+
+    if (addr >= size || size - (size_t)addr < sizeof(value)) {
+        fprintf(stderr, "[DMA BUS] Read outside memory bounds\n");
+        g_dma_bus_error = 1;
+        return 0;
+    }
+
+    memcpy(&value, base + (size_t)addr, sizeof(value));
+
+    return (int)value;
 }
 
 /**
  * DPI Callback: Called from RTL when DMA write access
  */
-int dpi_bank_write32_legacy(long long offset, int value) {
-    void* dst = memory_bank_get_ptr((size_t)offset);
-    //printf("MEM WRITE RESULT: Address=%p, Write data=%x, Write rc=0, Readback=%x, Match=1\n",
-    //        (void*)((size_t)offset), *(unsigned int*)&value, *(unsigned int*)&value);
-    memcpy(dst,  &value, 4);
-    //fflush(stdout);
-       
+
+
+int dpi_bank_write32_legacy(long long offset, int value)
+{
+    uint8_t *base = NULL;
+    size_t size = 0;
+    uint32_t data = (uint32_t)value;
+    uint64_t addr;
+
+    if (g_os_ram != NULL) {
+        base = g_os_ram;
+        size = g_os_ram_size;
+    } else if (memory_bank_is_available()) {
+        base = (uint8_t *)memory_bank_get_ptr(0);
+        size = memory_bank_get_size();
+    }
+
+    if (offset < 0 || base == NULL) {
+        fprintf(stderr, "[DMA BUS] Invalid write destination\n");
+        g_dma_bus_error = 1;
+        return -1;
+    }
+
+    addr = (uint64_t)offset;
+
+    if (addr >= size || size - (size_t)addr < sizeof(data)) {
+        fprintf(stderr, "[DMA BUS] Write outside memory bounds\n");
+        g_dma_bus_error = 1;
+        return -1;
+    }
+
+    memcpy(base + (size_t)addr, &data, sizeof(data));
+
     return 0;
 }
-
 
 /**
  * DPI Callback: Called from RTL when DMA transfer completes
  */
+
 void dma_done_callback(void)
 {
-    printf("DMA completed\n");
-    fflush(stdout);   // keep ordering vs. printf_IMPORTANT output
+    g_dma_completion_seen = 1;
+
+    printf("[DMA] RTL completion callback received\n");
+    fflush(stdout);
 }
 
 #ifdef __cplusplus
 }
 #endif
-

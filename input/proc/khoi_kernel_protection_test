@@ -1,0 +1,6 @@
+1 5
+alloc 100 1
+kmalloc 100 2
+read 2 0 0
+write 65 2 0
+calc

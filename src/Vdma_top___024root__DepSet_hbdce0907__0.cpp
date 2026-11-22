@@ -179,9 +179,9 @@ VL_INLINE_OPT void Vdma_top___024root___nba_sequent__TOP__0(Vdma_top___024root* 
                         vlSelf->dma_top__DOT__u_dma_rtl__DOT__cross_bank = 0U;
                         vlSelf->dma_top__DOT__u_dma_rtl__DOT__last_desc = 1U;
                         vlSelf->dma_top__DOT__u_dma_rtl__DOT__dir_memset = 0U;
-                        vlSelf->dma_top__DOT__u_dma_rtl__DOT__total_bytes 
+                        vlSelf->dma_top__DOT__u_dma_rtl__DOT__total_bytes
                             = (IData)(vlSelf->desc_data_2);
-                        vlSelf->dma_top__DOT__u_dma_rtl__DOT__intr_en = 0U;
+                        vlSelf->dma_top__DOT__u_dma_rtl__DOT__intr_en = 1U;
                         vlSelf->dma_top__DOT__u_dma_rtl__DOT__error_reg = 0U;
                     }
                 }
