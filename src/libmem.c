@@ -42,6 +42,14 @@ static int __read_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
 static int __write_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
                                    addr_t offset, BYTE value);
 
+/* TẠM – gỡ khi Nhân merge: dùng hằng/hàm PAGEZERO chính thức trong include/mm64.h */
+#ifndef PAGING64_PAGEZERO_END
+#define PAGING64_PAGEZERO_END 0x1000ULL
+#endif
+#ifndef PAGING64_IS_PAGEZERO_ADDR
+#define PAGING64_IS_PAGEZERO_ADDR(addr) ((addr_t)(addr) < (addr_t)PAGING64_PAGEZERO_END)
+#endif
+
 /*enlist_vm_freerg_list - add new rg to freerg_list
  *@mm: memory region
  *@rg_elmt: new region
@@ -848,6 +856,23 @@ dma_translate_user_va(struct pcb_t *caller,
 #endif
 
 
+struct dma_seg_desc {
+    uint64_t src_pa;
+    uint64_t dst_pa;
+    uint64_t len;
+    uint64_t src_fpn;
+    uint64_t dst_fpn;
+};
+
+static void dma_unpin_seg_range(const struct dma_seg_desc *segs,
+                                size_t from, size_t to)
+{
+    for (size_t i = from; i < to; i++) {
+        dma_unpin_frame(segs[i].dst_fpn);
+        dma_unpin_frame(segs[i].src_fpn);
+    }
+}
+
 /*libmem_dma_memcpy - DMA memcpy
  *@caller: caller
  *@src: source region
@@ -864,52 +889,60 @@ int libmem_dma_memcpy(struct pcb_t *caller,
 {
     struct vm_rg_struct *src_rg;
     struct vm_rg_struct *dst_rg;
+    struct vm_area_struct *src_vma;
     addr_t src_start, dst_start;
     addr_t src_length, dst_length;
 
-if (caller == NULL || caller->mm == NULL ||
-    caller->krnl == NULL ||
-    caller->krnl->mm == NULL)
-    return -1;
+    if (caller == NULL || caller->mm == NULL ||
+        caller->krnl == NULL ||
+        caller->krnl->mm == NULL)
+        return -1;
 
     if (src >= PAGING_MAX_SYMTBL_SZ ||
         dst >= PAGING_MAX_SYMTBL_SZ ||
         size == 0)
         return -1;
 
-pthread_mutex_lock(&mmvm_lock);
-pthread_mutex_lock(&kmm_lock);
+    pthread_mutex_lock(&mmvm_lock);
+    pthread_mutex_lock(&kmm_lock);
 
-src_rg = get_symrg_byid(caller->mm, (int)src);
-dst_rg = get_symrg_byid(caller->krnl->mm, (int)dst);
+    src_rg = get_symrg_byid(caller->mm, (int)src);
+    dst_rg = get_symrg_byid(caller->krnl->mm, (int)dst);
 
-if (src_rg == NULL || dst_rg == NULL ||
-    src_rg->rg_start >= src_rg->rg_end ||
-    dst_rg->rg_start >= dst_rg->rg_end ||
-    src_rg->vmaid < 0 || dst_rg->vmaid < 0) {
-    pthread_mutex_unlock(&kmm_lock);
-    pthread_mutex_unlock(&mmvm_lock);
-    return -1;
-}
+    if (src_rg == NULL || dst_rg == NULL ||
+        src_rg->rg_start >= src_rg->rg_end ||
+        dst_rg->rg_start >= dst_rg->rg_end ||
+        src_rg->vmaid < 0 || dst_rg->vmaid < 0) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
+    }
+
+    src_vma = get_vma_by_num(caller->mm, src_rg->vmaid);
+    if (src_vma == NULL) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
+    }
 
     src_length = src_rg->rg_end - src_rg->rg_start;
     dst_length = dst_rg->rg_end - dst_rg->rg_start;
 
     /* Avoid integer overflow by checking with subtraction. */
-if ((addr_t)offset > src_length ||
-    (addr_t)offset > dst_length ||
-    (addr_t)size > src_length - (addr_t)offset ||
-    (addr_t)size > dst_length - (addr_t)offset) {
-    pthread_mutex_unlock(&kmm_lock);
-    pthread_mutex_unlock(&mmvm_lock);
-    return -1;
-}
+    if ((addr_t)offset > src_length ||
+        (addr_t)offset > dst_length ||
+        (addr_t)size > src_length - (addr_t)offset ||
+        (addr_t)size > dst_length - (addr_t)offset) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
+    }
 
     src_start = src_rg->rg_start + (addr_t)offset;
     dst_start = dst_rg->rg_start + (addr_t)offset;
 
 #ifdef MM64
-    /* m2s: source must be user, destination must be kernel. */
+    /* Source must be user (non-PAGEZERO), destination must be kernel. */
     if (PAGING64_IS_KERNEL_ADDR(src_start) ||
         !PAGING64_IS_KERNEL_ADDR(dst_start) ||
         (addr_t)size - 1 > KERNEL_BASE_ADDR - 1 - src_start ||
@@ -918,80 +951,151 @@ if ((addr_t)offset > src_length ||
         pthread_mutex_unlock(&mmvm_lock);
         return -1;
     }
-#endif
 
-#ifdef MM64
-    uint64_t src_pa = 0;
-    uint64_t dst_pa = 0;
-    uint64_t request_id = 0;
-    uint64_t src_fpn = 0;
-    uint64_t dst_fpn = 0;
+    /* TẠM – gỡ điều kiện (src_vma->vm_start >= PAGING64_PAGEZERO_END) khi Nhân merge 3 VMA */
+    if (src_vma->vm_start >= PAGING64_PAGEZERO_END &&
+        PAGING64_IS_PAGEZERO_ADDR(src_start)) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
+    }
 
-    /*
-     * Initial implementation:
-     * - 4-byte aligned transfers only
-     * - one source page and one destination page
-     * - both pages must already be resident in RAM
-     */
+    /* RTL DMA requires 4-byte aligned addresses and length. */
     if (((uint64_t)src_start & 3U) != 0 ||
         ((uint64_t)dst_start & 3U) != 0 ||
-        (size & 3U) != 0 ||
-        size > PAGING64_PAGESZ - PAGING64_OFFST(src_start) ||
-        size > PAGING64_PAGESZ - PAGING64_OFFST(dst_start)) {
-pthread_mutex_unlock(&kmm_lock);
-pthread_mutex_unlock(&mmvm_lock);
+        (size & 3U) != 0) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
+        return -1;
+    }
+
+    /* Count page-bounded segments before pinning. */
+    size_t num_segs = 0;
+    addr_t rem = (addr_t)size;
+    addr_t cur_src = src_start;
+    addr_t cur_dst = dst_start;
+
+    while (rem > 0) {
+        addr_t seg = rem;
+        addr_t src_room = PAGING64_PAGESZ - PAGING64_OFFST(cur_src);
+        addr_t dst_room = PAGING64_PAGESZ - PAGING64_OFFST(cur_dst);
+
+        if (src_room < seg)
+            seg = src_room;
+        if (dst_room < seg)
+            seg = dst_room;
+
+        num_segs++;
+        cur_src += seg;
+        cur_dst += seg;
+        rem -= seg;
+    }
+
+    struct dma_seg_desc *segs = malloc(num_segs * sizeof(*segs));
+    if (segs == NULL) {
+        pthread_mutex_unlock(&kmm_lock);
+        pthread_mutex_unlock(&mmvm_lock);
         return -1;
     }
 
     /*
-     * Keep mmvm_lock while translating, pinning and
-     * submitting. This serializes with __read, __write
-     * and __free in the current libmem implementation.
+     * Phase 1: Bring any swapped source page into RAM and pin each segment
+     * immediately so earlier pages cannot be evicted while paging in later ones.
      */
-    if (mm64_dma_pin_user_page(caller, src_start, &src_pa) != 0) {
-pthread_mutex_unlock(&kmm_lock);
-pthread_mutex_unlock(&mmvm_lock);
-        return -1;
+    size_t prepared = 0;
+    rem = (addr_t)size;
+    cur_src = src_start;
+    cur_dst = dst_start;
+
+    while (rem > 0) {
+        addr_t seg = rem;
+        addr_t src_room = PAGING64_PAGESZ - PAGING64_OFFST(cur_src);
+        addr_t dst_room = PAGING64_PAGESZ - PAGING64_OFFST(cur_dst);
+        addr_t src_pgn = PAGING64_PGN(cur_src);
+        addr_t src_pte = pte_get_entry(caller->mm, src_pgn, caller);
+        uint64_t src_pa = 0, dst_pa = 0;
+        uint64_t src_fpn = 0, dst_fpn = 0;
+
+        if (src_room < seg)
+            seg = src_room;
+        if (dst_room < seg)
+            seg = dst_room;
+
+        if (!PAGING_PAGE_PRESENT(src_pte)) {
+            int restored_fpn = 0;
+
+            if (!(src_pte & PAGING_PTE_SWAPPED_MASK) ||
+                pg_getpage(caller->mm, src_pgn, &restored_fpn, caller) != 0) {
+                dma_unpin_seg_range(segs, 0, prepared);
+                free(segs);
+                pthread_mutex_unlock(&kmm_lock);
+                pthread_mutex_unlock(&mmvm_lock);
+                return -1;
+            }
+        }
+
+        if (mm64_dma_pin_user_page(caller, cur_src, &src_pa) != 0) {
+            dma_unpin_seg_range(segs, 0, prepared);
+            free(segs);
+            pthread_mutex_unlock(&kmm_lock);
+            pthread_mutex_unlock(&mmvm_lock);
+            return -1;
+        }
+        src_fpn = src_pa / PAGING64_PAGESZ;
+
+        if (mm64_dma_pin_kernel_page(caller, cur_dst, &dst_pa) != 0) {
+            dma_unpin_frame(src_fpn);
+            dma_unpin_seg_range(segs, 0, prepared);
+            free(segs);
+            pthread_mutex_unlock(&kmm_lock);
+            pthread_mutex_unlock(&mmvm_lock);
+            return -1;
+        }
+        dst_fpn = dst_pa / PAGING64_PAGESZ;
+
+        segs[prepared].src_pa = src_pa;
+        segs[prepared].dst_pa = dst_pa;
+        segs[prepared].len = (uint64_t)seg;
+        segs[prepared].src_fpn = src_fpn;
+        segs[prepared].dst_fpn = dst_fpn;
+        prepared++;
+
+        cur_src += seg;
+        cur_dst += seg;
+        rem -= seg;
     }
 
-    src_fpn = src_pa / PAGING64_PAGESZ;
+    /*
+     * Phase 2: Submit all pinned segments asynchronously without waiting.
+     * Ownership of pins transfers to co_processor on each successful submit.
+     */
+    for (size_t i = 0; i < num_segs; i++) {
+        uint64_t request_id = 0;
 
-if (mm64_dma_pin_kernel_page(caller, dst_start, &dst_pa) != 0) {
-    dma_unpin_frame(src_fpn);
+        if (dma_submit_pinned_with_id(caller->pid,
+                                      segs[i].src_pa,
+                                      segs[i].dst_pa,
+                                      segs[i].len,
+                                      &request_id) != 0) {
+            dma_unpin_seg_range(segs, i, num_segs);
+            free(segs);
+            pthread_mutex_unlock(&kmm_lock);
+            pthread_mutex_unlock(&mmvm_lock);
+            return -1;
+        }
+
+        printf("[DMA PROCESS] PID=%u request=%llu submitted\n",
+               caller->pid,
+               (unsigned long long)request_id);
+    }
+
+    free(segs);
     pthread_mutex_unlock(&kmm_lock);
     pthread_mutex_unlock(&mmvm_lock);
-    return -1;
-}
-    dst_fpn = dst_pa / PAGING64_PAGESZ;
-
-    if (dma_submit_pinned_with_id(
-            caller->pid,
-            src_pa,
-            dst_pa,
-            (uint64_t)size,
-            &request_id) != 0) {
-        /* Queue did not take ownership of the pins. */
-        dma_unpin_frame(dst_fpn);
-        dma_unpin_frame(src_fpn);
-pthread_mutex_unlock(&kmm_lock);
-pthread_mutex_unlock(&mmvm_lock);
-        return -1;
-    }
-
-    /*
-     * DMA worker now owns the pins.
-     * CPU does not wait for RTL completion here.
-     */
-    printf("[DMA PROCESS] PID=%u request=%llu submitted\n",
-           caller->pid,
-           (unsigned long long)request_id);
-
-pthread_mutex_unlock(&kmm_lock);
-pthread_mutex_unlock(&mmvm_lock);
     return 0;
 #else
-pthread_mutex_unlock(&kmm_lock);
-pthread_mutex_unlock(&mmvm_lock);
+    pthread_mutex_unlock(&kmm_lock);
+    pthread_mutex_unlock(&mmvm_lock);
     return -1;
 #endif
 }
@@ -1215,14 +1319,6 @@ int __write_kernel_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset,
     return -1;
 #endif
 }
-
-/* TẠM – gỡ khi Nhân merge: dùng hằng/hàm PAGEZERO chính thức trong include/mm64.h */
-#ifndef PAGING64_PAGEZERO_END
-#define PAGING64_PAGEZERO_END 0x1000ULL
-#endif
-#ifndef PAGING64_IS_PAGEZERO_ADDR
-#define PAGING64_IS_PAGEZERO_ADDR(addr) ((addr_t)(addr) < (addr_t)PAGING64_PAGEZERO_END)
-#endif
 
 /*user_rg_to_va - validate user region [start, end) and compute user VA.
  * Caller must hold mmvm_lock.
