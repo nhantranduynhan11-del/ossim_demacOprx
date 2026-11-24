@@ -36,6 +36,12 @@ static int peek_victim_page(struct mm_struct *mm,
 static int remove_fifo_page(struct mm_struct *mm,
                             addr_t pgn);
 
+static int __read_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
+                                  addr_t offset, BYTE *data);
+
+static int __write_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
+                                   addr_t offset, BYTE value);
+
 /*enlist_vm_freerg_list - add new rg to freerg_list
  *@mm: memory region
  *@rg_elmt: new region
@@ -352,55 +358,70 @@ int pg_getpage(struct mm_struct *mm, addr_t pgn,
 
     if (!PAGING_PAGE_PRESENT(pte)) {
         /* The page is marked SWAPPED: restore it from swap. */
+        addr_t vicpgn;
+        addr_t vicpte;
+        addr_t vicfpn, swpfpn;
+        struct sc_regs regs;
+        addr_t tgtfpn = PAGING_SWP(pte);
 
-    addr_t vicpgn;
-    addr_t vicpte;
-    addr_t vicfpn, swpfpn;
-    struct sc_regs regs;
-    addr_t tgtfpn = PAGING_SWP(pte);
-    /* TODO Initialize the target frame storing our variable */
-    //  addr_t tgtfpn
+        if (caller->krnl == NULL || caller->krnl->active_mswp == NULL ||
+            caller->krnl->mram == NULL) {
+            return -1;
+        }
 
-    /* TODO: Play with your paging theory here */
-    /* Find victim page */
+        /* Reserve swap space before removing a victim from FIFO. */
+        if (MEMPHY_get_freefp(caller->krnl->active_mswp,
+                              &swpfpn) != 0) {
+            return -1;
+        }
 
-    /* Reserve swap space before removing a victim from FIFO. */
-    if (MEMPHY_get_freefp(caller->krnl->active_mswp,
-                          &swpfpn) != 0) {
-        return -1;
+        /* Peek the oldest resident page that is not DMA-pinned. */
+        if (peek_victim_page(caller->mm, &vicpgn, caller) != 0) {
+            MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
+            return -1;
+        }
+
+        vicpte = pte_get_entry(caller->mm, vicpgn, caller);
+        vicfpn = PAGING_FPN(vicpte);
+
+        /* Swap out victim frame from MEMRAM to MEMSWP via SYSCALL 17. */
+        memset(&regs, 0, sizeof(regs));
+        regs.a1 = SYSMEM_SWP_OP;
+        regs.a2 = vicfpn;
+        regs.a3 = swpfpn;
+        if (_syscall(caller->krnl, caller->pid, 17, &regs) < 0) {
+            MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
+            return -1;
+        }
+
+        /* Swap in target frame from MEMSWP to MEMRAM; rollback on failure. */
+        if (__swap_cp_page(caller->krnl->active_mswp, tgtfpn,
+                           caller->krnl->mram, vicfpn) != 0) {
+            __swap_cp_page(caller->krnl->active_mswp, swpfpn,
+                           caller->krnl->mram, vicfpn);
+            MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
+            return -1;
+        }
+
+        if (pte_set_swap(caller, vicpgn, 0, swpfpn) != 0) {
+            __swap_cp_page(caller->krnl->active_mswp, swpfpn,
+                           caller->krnl->mram, vicfpn);
+            MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
+            return -1;
+        }
+
+        if (pte_set_fpn(caller->mm, pgn, vicfpn, caller) != 0) {
+            pte_set_fpn(caller->mm, vicpgn, vicfpn, caller);
+            __swap_cp_page(caller->krnl->active_mswp, swpfpn,
+                           caller->krnl->mram, vicfpn);
+            MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
+            return -1;
+        }
+
+        remove_fifo_page(caller->mm, vicpgn);
+        MEMPHY_put_freefp(caller->krnl->active_mswp, tgtfpn);
+        enlist_pgn_node(&caller->mm->fifo_pgn, pgn);
     }
-
-    /* Select the oldest resident page that is not DMA-pinned. */
-    if (find_victim_page(caller->mm, &vicpgn, caller) != 0) {
-        MEMPHY_put_freefp(caller->krnl->active_mswp, swpfpn);
-        return -1;
-    }
-
-    vicpte = pte_get_entry(caller->mm, vicpgn, caller);
-    vicfpn = PAGING_FPN(vicpte);
-    /* TODO: Implement swap frame from MEMRAM to MEMSWP and vice versa*/
-
-    /* TODO copy victim frame to swap
-     * SWP(vicfpn <--> swpfpn)
-     * SYSCALL 1 sys_memmap
-     */
-    regs.a1 = SYSMEM_SWP_OP;
-    regs.a2 = vicfpn;
-    regs.a3 = swpfpn;
-    _syscall(caller->krnl, caller->pid, 17, &regs);
-
-    /* Update page table */
-    // pte_set_swap(...);
-
-    /* Update its online status of the target page */
-    // pte_set_fpn(...);
-    __swap_cp_page(caller->krnl->active_mswp, tgtfpn, caller->krnl->mram,
-                   vicfpn);
-    MEMPHY_put_freefp(caller->krnl->active_mswp, tgtfpn);
-    pte_set_swap(caller, vicpgn, 0, swpfpn);
-    pte_set_fpn(caller->mm, pgn, vicfpn, caller);
-    enlist_pgn_node(&caller->mm->fifo_pgn, pgn);
-  }
 
   *fpn = PAGING_FPN(pte_get_entry(caller->mm, pgn, caller));
 
@@ -996,6 +1017,7 @@ int libkmem_copy_from_user(struct pcb_t *caller,
         get_symrg_byid(caller->krnl->mm, destination);
 
     if (src_rg == NULL || dst_rg == NULL ||
+        src_rg->vmaid < 0 || dst_rg->vmaid < 0 ||
         src_rg->rg_start >= src_rg->rg_end ||
         dst_rg->rg_start >= dst_rg->rg_end ||
         offset > src_rg->rg_end - src_rg->rg_start ||
@@ -1010,10 +1032,9 @@ int libkmem_copy_from_user(struct pcb_t *caller,
     for (uint32_t i = 0; i < size; i++) {
         BYTE value;
 
-        if (pg_getval(caller->mm,
-                      src_rg->rg_start + offset + i,
-                      &value, caller) != 0 ||
-            __write_kernel_mem(caller, 0, destination,
+        if (__read_user_mem_locked(caller, src_rg->vmaid, (int)source,
+                                   offset + i, &value) != 0 ||
+            __write_kernel_mem(caller, dst_rg->vmaid, (int)destination,
                                offset + i, value) != 0) {
             pthread_mutex_unlock(&kmm_lock);
             pthread_mutex_unlock(&mmvm_lock);
@@ -1048,6 +1069,7 @@ int libkmem_copy_to_user(struct pcb_t *caller,
         get_symrg_byid(caller->mm, destination);
 
     if (src_rg == NULL || dst_rg == NULL ||
+        src_rg->vmaid < 0 || dst_rg->vmaid < 0 ||
         src_rg->rg_start >= src_rg->rg_end ||
         dst_rg->rg_start >= dst_rg->rg_end ||
         offset > src_rg->rg_end - src_rg->rg_start ||
@@ -1062,11 +1084,10 @@ int libkmem_copy_to_user(struct pcb_t *caller,
     for (uint32_t i = 0; i < size; i++) {
         BYTE value;
 
-        if (__read_kernel_mem(caller, 0, source,
+        if (__read_kernel_mem(caller, src_rg->vmaid, (int)source,
                               offset + i, &value) != 0 ||
-            pg_setval(caller->mm,
-                      dst_rg->rg_start + offset + i,
-                      value, caller) != 0) {
+            __write_user_mem_locked(caller, dst_rg->vmaid, (int)destination,
+                                    offset + i, value) != 0) {
             pthread_mutex_unlock(&kmm_lock);
             pthread_mutex_unlock(&mmvm_lock);
             return -1;
@@ -1195,19 +1216,90 @@ int __write_kernel_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset,
 #endif
 }
 
+/* TẠM – gỡ khi Nhân merge: dùng hằng/hàm PAGEZERO chính thức trong include/mm64.h */
+#ifndef PAGING64_PAGEZERO_END
+#define PAGING64_PAGEZERO_END 0x1000ULL
+#endif
+#ifndef PAGING64_IS_PAGEZERO_ADDR
+#define PAGING64_IS_PAGEZERO_ADDR(addr) ((addr_t)(addr) < (addr_t)PAGING64_PAGEZERO_END)
+#endif
+
+/*user_rg_to_va - validate user region [start, end) and compute user VA.
+ * Caller must hold mmvm_lock.
+ */
+static int user_rg_to_va(struct pcb_t *caller, int vmaid, int rgid,
+                         addr_t offset, addr_t *va)
+{
+    if (caller == NULL || caller->mm == NULL || va == NULL ||
+        vmaid < 0 || rgid < 0 || rgid >= PAGING_MAX_SYMTBL_SZ)
+        return -1;
+
+    struct vm_rg_struct *rg = get_symrg_byid(caller->mm, rgid);
+
+    /* Validate region and vmaid before get_vma_by_num() to avoid NULL deref on d279fd2. */
+    if (rg == NULL || rg->rg_start >= rg->rg_end ||
+        rg->vmaid < 0 || rg->vmaid != vmaid ||
+        offset >= rg->rg_end - rg->rg_start)
+        return -1;
+
+    struct vm_area_struct *vma = get_vma_by_num(caller->mm, vmaid);
+    if (vma == NULL)
+        return -1;
+
+    addr_t addr = rg->rg_start + offset;
+    if (addr < vma->vm_start || addr >= vma->vm_end)
+        return -1;
+
+#ifdef MM64
+    if (PAGING64_IS_KERNEL_ADDR(addr))
+        return -1;
+    /* TẠM – gỡ điều kiện (vma->vm_start >= PAGING64_PAGEZERO_END) khi Nhân merge 3 VMA */
+    if (vma->vm_start >= PAGING64_PAGEZERO_END && PAGING64_IS_PAGEZERO_ADDR(addr))
+        return -1;
+#endif
+
+    *va = addr;
+    return 0;
+}
+
+static int __read_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
+                                  addr_t offset, BYTE *data)
+{
+    addr_t va;
+
+    if (data == NULL)
+        return -1;
+
+    if (user_rg_to_va(caller, vmaid, rgid, offset, &va) != 0)
+        return -1;
+
+    return pg_getval(caller->mm, va, data, caller);
+}
+
+static int __write_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
+                                   addr_t offset, BYTE value)
+{
+    addr_t va;
+
+    if (user_rg_to_va(caller, vmaid, rgid, offset, &va) != 0)
+        return -1;
+
+    return pg_setval(caller->mm, va, value, caller);
+}
+
 /*__read_user_mem - read value in user region memory
  *@caller: caller
  *@vmaid: ID vm area to alloc memory region
  *@rgid: memory region ID (used to identify variable in symbole table)
  *@offset: offset to acess in memory region
- *@value: data value
+ *@data: output data value
  */
 int __read_user_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE *data)
 {
-  /* TODO: provide OS level management user memory access */
-  //krnl->pgd ... or krnl->krnl_pgd  ... based on kmem implementation strategy
-
-   return 0;
+    pthread_mutex_lock(&mmvm_lock);
+    int ret = __read_user_mem_locked(caller, vmaid, rgid, offset, data);
+    pthread_mutex_unlock(&mmvm_lock);
+    return ret;
 }
 
 
@@ -1220,10 +1312,10 @@ int __read_user_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BY
  */
 int __write_user_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE value)
 {
-  /* TODO: provide OS level management user memory access */
-  //krnl->pgd ... or krnl->krnl_pgd  ... based on kmem implementation strategy
-
-  return 0;
+    pthread_mutex_lock(&mmvm_lock);
+    int ret = __write_user_mem_locked(caller, vmaid, rgid, offset, value);
+    pthread_mutex_unlock(&mmvm_lock);
+    return ret;
 }
 
 
