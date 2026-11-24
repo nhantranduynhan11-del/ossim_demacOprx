@@ -32,16 +32,20 @@ static pthread_mutex_t kmm_lock = PTHREAD_MUTEX_INITIALIZER;
  */
 int enlist_vm_freerg_list(struct mm_struct *mm, struct vm_rg_struct *rg_elmt)
 {
-  struct vm_rg_struct *rg_node = mm->mmap->vm_freerg_list;
+  if(mm == NULL || rg_elmt == NULL)
+    return -1;
 
   if (rg_elmt->rg_start >= rg_elmt->rg_end)
     return -1;
 
-  if (rg_node != NULL)
-    rg_elmt->rg_next = rg_node;
+  struct vm_area_struct *rg_node = get_vma_by_num(mm, rg_elmt->vmaid);
 
+  if (rg_node == NULL)
+    return -1;
+
+  rg_elmt->rg_next = rg_node->vm_freerg_list;
   /* Enlist the new region */
-  mm->mmap->vm_freerg_list = rg_elmt;
+  rg_node->vm_freerg_list = rg_elmt;
 
   return 0;
 }
@@ -140,6 +144,7 @@ int __alloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t *allo
     {
       newrg->rg_start = old_sbrk + size;
       newrg->rg_end = old_sbrk + inc_sz;
+      newrg->vmaid = vmaid;
       newrg->rg_next = NULL;
       if (enlist_vm_freerg_list(caller->mm, newrg) != 0)
         free(newrg);
@@ -225,14 +230,12 @@ int liballoc(struct pcb_t *proc, addr_t size, uint32_t reg_index)
   }
 #ifdef IODUMP
   printf("PHYSICAL MEMORY AFTER ALLOCATION\n");
-  printf("liballoc: allocated %llu bytes at 0x%11x for reg_index %u\n", (unsigned long long)size, (unsigned long long)addr, reg_index);
+  printf("liballoc: allocated %d bytes at 0x%08x for reg_index %d\n", size, addr, reg_index);
 #ifdef PAGETBL_DUMP
   print_pgtbl(proc, 0, -1); 
 #endif
   MEMPHY_dump(proc->krnl->mram);
 #endif
-
-  /* By default using vmaid = 0 */
   return val;
 }
 
@@ -244,6 +247,17 @@ int liballoc(struct pcb_t *proc, addr_t size, uint32_t reg_index)
 
 int libfree(struct pcb_t *proc, uint32_t reg_index)
 {
+  if(proc == NULL || proc->mm == NULL || reg_index >= PAGING_MAX_SYMTBL_SZ)
+  {
+    return -1;
+  }
+
+  struct vm_rg_struct *rgnode = get_symrg_byid(proc->mm, reg_index);
+  if(rgnode == NULL || rgnode->rg_start >= rgnode->rg_end || rgnode->vmaid < 0)
+  {
+    return -1;
+  }
+
   int val = __free(proc, 0, reg_index);
   if (val == -1)
   {
@@ -252,7 +266,7 @@ int libfree(struct pcb_t *proc, uint32_t reg_index)
 
 #ifdef IODUMP
   printf("PHYSICAL MEMORY AFTER FREEING\n");
-  printf("libfree: freed memory for reg_index %u\n", reg_index);
+  printf("libfree: freed memory for reg_index %d\n", reg_index);
 #ifdef PAGETBL_DUMP
   print_pgtbl(proc, 0, -1); 
 #endif
@@ -457,20 +471,16 @@ int libread(
     addr_t offset,    // Source address = [source] + [offset]
     uint32_t* destination)
 {
-  BYTE data = 0;
+  BYTE data;
+
   int val = __read(proc, 0, source, offset, &data);
-  if(val == -1)
-  {
-    return -1;
-  }
 
   *destination = data;
 #ifdef IODUMP
-  printf("read region=%u offset=%llu value=%u\n", source, (unsigned long long)offset, data);
+  /* TODO dump IO content (if needed) */
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); 
+  print_pgtbl(proc, 0, -1); // print max TBL
 #endif
-  MEMPHY_dump(proc->krnl->mram);
 #endif
 
   return val;
@@ -523,11 +533,10 @@ int libwrite(
     return -1;
   }
 #ifdef IODUMP
-  printf("write region=%u offset=%llu value=%u\n", destination, (unsigned long long)offset, data);
+  /* TODO dump IO content (if needed) */
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); 
+  print_pgtbl(proc, 0, -1); // print max TBL
 #endif
-  MEMPHY_dump(proc->krnl->mram);
 #endif
 
   return val;
@@ -762,7 +771,13 @@ int find_victim_page(struct mm_struct *mm, addr_t *retpgn) {
  */
 int get_free_vmrg_area(struct pcb_t *caller, int vmaid, int size, struct vm_rg_struct *newrg)
 {
+  if(caller == NULL || caller->mm == NULL || newrg == NULL || size <= 0)
+    return -1;
+
   struct vm_area_struct *cur_vma = get_vma_by_num(caller->mm, vmaid);
+
+  if(cur_vma == NULL || newrg == NULL || size <= 0)
+    return -1;
 
   struct vm_rg_struct *rgit = cur_vma->vm_freerg_list;
 

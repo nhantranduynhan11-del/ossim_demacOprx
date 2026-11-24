@@ -29,23 +29,16 @@ struct vm_area_struct *get_vma_by_num(struct mm_struct *mm, int vmaid)
 {
   struct vm_area_struct *pvma;
 
-  if (mm->mmap == NULL)
+  if (mm == NULL)
     return NULL;
 
-  pvma = mm->mmap;
-
-  int vmait = pvma->vm_id;
-
-  while (vmait < vmaid)
+  for (pvma = mm->mmap; pvma != NULL; pvma = pvma->vm_next)
   {
-    if (pvma == NULL)
-      return NULL;
-
-    pvma = pvma->vm_next;
-    vmait = pvma->vm_id;
+    if ((int)pvma->vm_id == vmaid)
+      return pvma;
   }
 
-  return pvma;
+  return NULL;
 }
 
 int __mm_swap_page(struct pcb_t *caller, addr_t vicfpn , addr_t swpfpn)
@@ -72,6 +65,10 @@ struct vm_rg_struct *get_vm_area_node_at_brk(struct pcb_t *caller, int vmaid, ad
     return NULL;
 
   cur_vma = get_vma_by_num(caller->mm, vmaid);
+
+  if(cur_vma == NULL)
+    return NULL;
+
   if(cur_vma->sbrk > cur_vma->vm_end || alignedsz > (cur_vma->vm_end - cur_vma->sbrk))
     return NULL;
 
@@ -144,7 +141,7 @@ int inc_vma_limit(struct pcb_t *caller, int vmaid, addr_t inc_sz)
 
   struct vm_area_struct *cur_area;
   struct vm_rg_struct *newrg;
-  struct vm_rg_struct *rg;
+  struct vm_rg_struct rg;
 
   addr_t inc_atm;
   addr_t inc_pg;
