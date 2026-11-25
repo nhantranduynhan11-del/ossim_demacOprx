@@ -646,16 +646,15 @@ static void * cpu_routine(void * args) {
     sigemptyset(&irq_mask);
     sigaddset(&irq_mask, SIGUSR1);
 
-    if (pthread_sigmask(SIG_UNBLOCK, &irq_mask, NULL) != 0) {
-        fprintf(stderr,
-                "[DMA IRQ] CPU cannot unblock SIGUSR1\n");
+int mask_rc = pthread_sigmask(SIG_UNBLOCK, &irq_mask, NULL);
 
-        pthread_mutex_lock(&dma_mutex);
-        cpu_alive[id] = 0;
-        pthread_mutex_unlock(&dma_mutex);
+if (mask_rc != 0) {
+    fprintf(stderr,
+            "[DMA IRQ] CPU %d cannot unblock SIGUSR1: %s\n",
+            id, strerror(mask_rc));
+    exit(EXIT_FAILURE);
+}
 
-        return NULL;
-    }
 struct timer_id_t * timer_id =
         ((struct cpu_args*)args)->timer_id;
 
@@ -1345,18 +1344,37 @@ if (num_cpus <= 0 || cpu == NULL || dma == NULL ||
         return 1;
     }
 
-	/* Run CPU and loader */
+/* Run CPU and loader */
+int thread_rc;
 
 #ifdef MM_PAGING
-	pthread_create(&ld, NULL, ld_routine, (void*)mm_ld_args);
+    thread_rc = pthread_create(
+        &ld, NULL, ld_routine, (void*)mm_ld_args
+    );
 #else
-	pthread_create(&ld, NULL, ld_routine, (void*)ld_event);
+    thread_rc = pthread_create(
+        &ld, NULL, ld_routine, (void*)ld_event
+    );
 #endif
-	for (i = 0; i < num_cpus; i++) {
-		pthread_create(&cpu[i], NULL,
-			cpu_routine, (void*)&args[i]);
-	}
 
+if (thread_rc != 0) {
+    fprintf(stderr,
+            "[OS] Cannot create loader thread: %s\n",
+            strerror(thread_rc));
+    exit(EXIT_FAILURE);
+}
+for (i = 0; i < num_cpus; i++) {
+    thread_rc = pthread_create(
+        &cpu[i], NULL, cpu_routine, (void*)&args[i]
+    );
+
+    if (thread_rc != 0) {
+        fprintf(stderr,
+                "[OS] Cannot create CPU %d thread: %s\n",
+                i, strerror(thread_rc));
+        exit(EXIT_FAILURE);
+    }
+}
 pthread_join(ld, NULL);
 
 pthread_mutex_lock(&dma_mutex);
@@ -1582,6 +1600,9 @@ for (i = 0; i < num_cpus; i++) {
     sysbus_unbind_os_ram();
     /* Stop timer */
     stop_timer();
+
+    free(cpu_alive);
+    cpu_alive = NULL;
 
     free(cpu);
     free(dma);
