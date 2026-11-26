@@ -1,0 +1,4 @@
+1 3
+alloc 512 1
+kmalloc 512 2
+dma_memcpy 1 2 0 512

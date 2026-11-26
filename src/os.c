@@ -28,6 +28,7 @@
 #include "dpi_rtl.h"
 #include "dma.h"
 #include <time.h>
+#include <signal.h>
 
 static int time_slot;
 static int num_cpus;
@@ -40,6 +41,25 @@ static pthread_cond_t dma_cond = PTHREAD_COND_INITIALIZER;
 static int dma_init_done = 0;
 static int dma_init_ok = 0;
 static int dma_stop_requested = 0;
+
+/*
+ * CPU threads available to receive DMA interrupts.
+ *
+ * All accesses to cpu_alive and cpu_threads must be
+ * protected by dma_mutex.
+ */
+static pthread_t *cpu_threads = NULL;
+static int *cpu_alive = NULL;
+static int cpu_thread_count = 0;
+static int cpu_shutdown_requested = 0;
+static int cpu_finished_processes = 0;
+static __thread volatile sig_atomic_t cpu_irq_pending = 0;
+
+static void dma_signal_handler(int signo)
+{
+    if (signo == SIGUSR1)
+        cpu_irq_pending = 1;
+}
 
 #ifdef MM_PAGING
 static unsigned long memramsz;
@@ -95,11 +115,149 @@ struct dma_request {
 
     /* Link in all submitted requests, for status queries. */
     struct dma_request *all_next;
+
+    /*
+     * Link in the IRQ completion queue.
+     * Kept separate from the DMA submission queue
+     * and the all-requests list.
+     */
+    struct dma_request *irq_next;
+
+    /*
+     * Result returned by the RTL transfer.
+     * This is processed later in CPU context.
+     */
+    int irq_result;
 };
 
 static struct dma_request *dma_head = NULL;
 static struct dma_request *dma_tail = NULL;
 static struct dma_request *dma_all_head = NULL;
+/*
+ * Pending hardware completion events.
+ *
+ * Protected by dma_mutex.
+ * Each finished RTL request must appear at most once
+ * in this queue.
+ */
+static struct dma_request *dma_irq_head = NULL;
+static struct dma_request *dma_irq_tail = NULL;
+
+static void dma_completion_handler(
+    struct dma_request *req,
+    int result
+);
+
+/*
+ * Enqueue a completed RTL DMA request for CPU handling.
+ *
+ * Only the DMA worker enqueues completion events.
+ * dma_mutex protects the queue.
+ */
+static void dma_irq_enqueue(struct dma_request *req, int result)
+{
+    pthread_mutex_lock(&dma_mutex);
+
+    req->irq_result = result;
+    req->irq_next = NULL;
+
+    if (dma_irq_tail == NULL) {
+        dma_irq_head = req;
+        dma_irq_tail = req;
+    } else {
+        dma_irq_tail->irq_next = req;
+        dma_irq_tail = req;
+    }
+
+    pthread_cond_broadcast(&dma_cond);
+
+    pthread_mutex_unlock(&dma_mutex);
+}
+
+/*
+ * Remove one pending DMA completion event.
+ *
+ * The returned request is still tracked by dma_all_head.
+ * Its final DONE/FAILED state will be assigned later
+ * by dma_completion_handler() in CPU context.
+ */
+static struct dma_request *dma_irq_dequeue(void)
+{
+    struct dma_request *req;
+
+    pthread_mutex_lock(&dma_mutex);
+
+    req = dma_irq_head;
+
+    if (req != NULL) {
+        dma_irq_head = req->irq_next;
+
+        if (dma_irq_head == NULL)
+            dma_irq_tail = NULL;
+
+        req->irq_next = NULL;
+    }
+
+    pthread_mutex_unlock(&dma_mutex);
+
+    return req;
+}
+
+/*
+ * Handle completed DMA requests in CPU thread context.
+ * Never call this directly from a POSIX signal handler.
+ */
+static void dma_handle_pending_irqs(int cpu_id)
+{
+    struct dma_request *req;
+
+if (cpu_irq_pending) {
+        cpu_irq_pending = 0;
+
+        printf("[CPU SIGNAL] CPU %d received SIGUSR1\n",
+               cpu_id);
+    }
+
+    while ((req = dma_irq_dequeue()) != NULL) {
+        printf("[CPU IRQ] CPU %d handling DMA id=%llu\n",
+               cpu_id,
+               (unsigned long long)req->id);
+
+        dma_completion_handler(req, req->irq_result);
+    }
+}
+
+/*
+ * Notify an active CPU thread that DMA completion
+ * events are waiting in the IRQ queue.
+ *
+ * pthread_kill is called while holding dma_mutex
+ * so that cpu_alive and cpu_threads remain consistent.
+ *
+ * The actual signal handler only sets a sig_atomic_t flag.
+ */
+static int dma_notify_cpu(void)
+{
+    int i;
+    int notified = 0;
+
+    pthread_mutex_lock(&dma_mutex);
+
+    for (i = 0; i < cpu_thread_count; i++) {
+        if (!cpu_alive[i])
+            continue;
+
+        if (pthread_kill(cpu_threads[i], SIGUSR1) == 0) {
+            notified = 1;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&dma_mutex);
+
+    return notified ? 0 : -1;
+}
+
 static uint64_t dma_next_id = 1;
 static uint64_t dma_ram_bound = 0;
 static BYTE *dma_verify_ram = NULL;
@@ -237,6 +395,8 @@ req->destination = destination;
 req->length = length;
 req->next = NULL;
 req->all_next = NULL;
+req->irq_next = NULL;
+req->irq_result = 0;
 req->state = DMA_REQ_QUEUED;
 
 req->owner_pid = owner_pid;
@@ -397,13 +557,117 @@ int dma_process_has_pending(uint32_t pid)
     return pending;
 }
 
+#ifdef MM64
+/*
+ * Finished processes whose memory cannot be released yet
+ * because DMA may still be using their physical frames.
+ *
+ * Each CPU maintains its own list.
+ */
+struct deferred_pcb {
+    struct pcb_t *proc;
+    struct deferred_pcb *next;
+};
+
+/*
+ * The process must already have been removed from the
+ * scheduler by finish_proc() before this function runs.
+ */
+static void release_finished_pcb(struct pcb_t *proc)
+{
+    if (proc == NULL)
+        return;
+
+    free_pcb_pgtbl(proc);
+
+    if (proc->code != NULL) {
+        free(proc->code->text);
+        free(proc->code);
+    }
+
+    free(proc->page_table);
+    free(proc);
+}
+
+/*
+ * Release completed processes when they no longer own
+ * queued or running DMA requests.
+ *
+ * Called only by the CPU owning this deferred list.
+ */
+static void reap_deferred_pcbs(struct deferred_pcb **head)
+{
+    struct deferred_pcb **link = head;
+
+    while (*link != NULL) {
+        struct deferred_pcb *node = *link;
+
+        if (dma_process_has_pending(node->proc->pid)) {
+            link = &node->next;
+            continue;
+        }
+
+        *link = node->next;
+
+        release_finished_pcb(node->proc);
+        free(node);
+    }
+}
+#endif
+
+/*
+ * CPU threads stay alive until main explicitly permits
+ * shutdown after all DMA completions have been handled.
+ */
+static int cpu_shutdown_allowed(void)
+{
+    int allowed;
+
+    pthread_mutex_lock(&dma_mutex);
+    allowed = cpu_shutdown_requested;
+    pthread_mutex_unlock(&dma_mutex);
+
+    return allowed;
+}
+
 static void * cpu_routine(void * args) {
-	struct timer_id_t * timer_id = ((struct cpu_args*)args)->timer_id;
-	int id = ((struct cpu_args*)args)->id;
-	/* Check for new process in ready queue */
-	int time_left = 0;
-	struct pcb_t * proc = NULL;
+    int id = ((struct cpu_args*)args)->id;
+    sigset_t irq_mask;
+
+    cpu_irq_pending = 0;
+
+    pthread_mutex_lock(&dma_mutex);
+
+    cpu_threads[id] = pthread_self();
+    cpu_alive[id] = 1;
+
+    pthread_mutex_unlock(&dma_mutex);
+
+    sigemptyset(&irq_mask);
+    sigaddset(&irq_mask, SIGUSR1);
+
+int mask_rc = pthread_sigmask(SIG_UNBLOCK, &irq_mask, NULL);
+
+if (mask_rc != 0) {
+    fprintf(stderr,
+            "[DMA IRQ] CPU %d cannot unblock SIGUSR1: %s\n",
+            id, strerror(mask_rc));
+    exit(EXIT_FAILURE);
+}
+
+struct timer_id_t * timer_id =
+        ((struct cpu_args*)args)->timer_id;
+
+    int time_left = 0;
+    struct pcb_t *proc = NULL;
+#ifdef MM64
+    struct deferred_pcb *deferred_pcbs = NULL;
+#endif
 	while (1) {
+  dma_handle_pending_irqs(id);
+#ifdef MM64
+    reap_deferred_pcbs(&deferred_pcbs);
+#endif
 		/* Check the status of current process */
 if (proc == NULL) {
     proc = get_proc();
@@ -413,37 +677,84 @@ if (proc == NULL) {
          * No ready process remains and the loader has
          * finished creating all processes.
          */
-        if (done) {
-            printf("\tCPU %d stopped\n", id);
-            break;
-        }
+if (done && cpu_shutdown_allowed()
+#ifdef MM64
+    && deferred_pcbs == NULL
+#endif
+) {
+    printf("\tCPU %d stopped\n", id);
+    break;
+}
 
         next_slot(timer_id);
         continue;
     }
 }
-		else if (proc->pc == proc->code->size) {
-			/* The porcess has finish it job */
-			printf("\tCPU %d: Processed %2d has finished\n",
-				id ,proc->pid);
+else if (proc->pc == proc->code->size) {
+    /*
+     * The process has finished executing instructions.
+     * It must leave the scheduler before its PCB is freed.
+     */
+    printf("\tCPU %d: Processed %2d has finished\n",
+           id, proc->pid);
+
 #ifdef MM64
     /*
-     * Wait for outstanding DMA before releasing
-     * process memory and page tables.
+     * Check whether DMA is still using this process's
+     * physical memory.
      */
-    dma_wait_for_process(proc->pid);
-    free_pcb_pgtbl(proc);
+    int dma_pending = dma_process_has_pending(proc->pid);
+    struct deferred_pcb *node = NULL;
+
+    if (dma_pending) {
+        node = malloc(sizeof(*node));
+
+        if (node == NULL) {
+            /*
+             * Do not release a PCB while DMA may still use
+             * its physical frames.
+             */
+            fprintf(stderr,
+                    "[DMA] Cannot defer PCB cleanup for PID %u\n",
+                    (unsigned int)proc->pid);
+            abort();
+        }
+
+        node->proc = proc;
+        node->next = NULL;
+    }
 #endif
 
     /*
-     * Remove PCB from the scheduler registry
-     * before releasing the PCB itself.
+     * Remove the completed process from the scheduler
+     * while its PCB is still valid.
      */
     finish_proc(proc);
+/*
+ * Notify main that this process has completed execution.
+ */
+pthread_mutex_lock(&dma_mutex);
+cpu_finished_processes++;
+pthread_cond_broadcast(&dma_cond);
+pthread_mutex_unlock(&dma_mutex);
+#ifdef MM64
+    if (dma_pending) {
+        /*
+         * Defer freeing memory until the DMA completion
+         * handler has finished and released frame pins.
+         */
+        node->next = deferred_pcbs;
+        deferred_pcbs = node;
 
-    /*
-     * Release objects allocated by load().
-     */
+        printf("[DMA] Deferred PCB cleanup PID=%u\n",
+               (unsigned int)proc->pid);
+    } else {
+        /*
+         * No outstanding DMA: release immediately.
+         */
+        release_finished_pcb(proc);
+    }
+#else
     if (proc->code != NULL) {
         free(proc->code->text);
         free(proc->code);
@@ -451,9 +762,12 @@ if (proc == NULL) {
 
     free(proc->page_table);
     free(proc);
-			proc = get_proc();
-			time_left = 0;
-		}else if (time_left == 0) {
+#endif
+
+    proc = get_proc();
+    time_left = 0;
+}
+		else if (time_left == 0) {
 			/* The process has done its job in current time slot */
 			printf("\tCPU %d: Put process %2d to run queue\n",
 				id, proc->pid);
@@ -462,10 +776,13 @@ if (proc == NULL) {
 		}
 
 		/* Recheck process status after loading new process */
-		if (proc == NULL && done) {
-			/* No process to run, exit */
-			printf("\tCPU %d stopped\n", id);
-			break;
+if (proc == NULL && done && cpu_shutdown_allowed()
+#ifdef MM64
+    && deferred_pcbs == NULL
+#endif
+) {
+    printf("\tCPU %d stopped\n", id);
+    break;
 		}else if (proc == NULL) {
 			/* There may be new processes to run in
 			 * next time slots, just skip current slot */
@@ -482,8 +799,18 @@ if (proc == NULL) {
 		time_left--;
 		next_slot(timer_id);
 	}
-	detach_event(timer_id);
-	pthread_exit(NULL);
+sigset_t irq_mask_on_exit;
+    sigemptyset(&irq_mask_on_exit);
+    sigaddset(&irq_mask_on_exit, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &irq_mask_on_exit, NULL);
+
+    pthread_mutex_lock(&dma_mutex);
+    cpu_alive[id] = 0;
+    pthread_cond_broadcast(&dma_cond);
+    pthread_mutex_unlock(&dma_mutex);
+
+    detach_event(timer_id);
+    return NULL;
 }
 
 /*
@@ -492,8 +819,7 @@ if (proc == NULL) {
  */
 static void dma_completion_handler(struct dma_request *req, int result)
 {
-    int failed = (result != 0 || sysbus_get_dma_error() != 0);
-
+    int failed = (result != 0);
 #ifdef MM64
     /*
      * The DMA transfer has stopped using these physical frames.
@@ -643,6 +969,10 @@ static void *co_processor(void *arg)
                                   req->destination,
                                   req->length);
 
+        if (sysbus_get_dma_error() != 0) {
+            result = -1;
+        }
+
         if (abcd_check) {
             int source_ok =
                 memcmp(dma_verify_ram + req->source,
@@ -675,7 +1005,13 @@ static void *co_processor(void *arg)
             }
         }
 
-        dma_completion_handler(req, result);
+dma_irq_enqueue(req, result);
+
+if (dma_notify_cpu() != 0) {
+    fprintf(stderr,
+            "[DMA IRQ] No active CPU to notify for id=%llu\n",
+            (unsigned long long)req->id);
+}
     }
 
     rtl_dma_cleanup_simulation();
@@ -855,6 +1191,30 @@ static void read_config(const char * path) {
 }
 
 int main(int argc, char * argv[]) {
+    struct sigaction dma_irq_action;
+    sigset_t dma_irq_mask;
+
+    memset(&dma_irq_action, 0, sizeof(dma_irq_action));
+    dma_irq_action.sa_handler = dma_signal_handler;
+    sigemptyset(&dma_irq_action.sa_mask);
+
+    if (sigaction(SIGUSR1, &dma_irq_action, NULL) != 0) {
+        perror("[DMA IRQ] sigaction");
+        return 1;
+    }
+
+    /*
+     * Block SIGUSR1 in the main thread.
+     * Threads created from here inherit this mask.
+     * Only CPU threads will unblock SIGUSR1.
+     */
+    sigemptyset(&dma_irq_mask);
+    sigaddset(&dma_irq_mask, SIGUSR1);
+
+    if (pthread_sigmask(SIG_BLOCK, &dma_irq_mask, NULL) != 0) {
+        fprintf(stderr, "[DMA IRQ] Cannot block SIGUSR1\n");
+        return 1;
+    }
 	/* Read config */
 	if (argc != 2) {
 		printf("Usage: os [path to configure file]\n");
@@ -871,6 +1231,24 @@ int main(int argc, char * argv[]) {
 	struct cpu_args * args =
 		(struct cpu_args*)malloc(sizeof(struct cpu_args) * num_cpus);
 	pthread_t ld;
+
+/*
+ * Register CPU thread storage before starting the DMA worker.
+ */
+cpu_threads = cpu;
+cpu_thread_count = num_cpus;
+
+cpu_alive = calloc((size_t)num_cpus, sizeof(*cpu_alive));
+
+if (num_cpus <= 0 || cpu == NULL || dma == NULL ||
+    args == NULL || cpu_alive == NULL) {
+    fprintf(stderr, "[DMA IRQ] Cannot allocate CPU thread state\n");
+    free(cpu_alive);
+    free(cpu);
+    free(dma);
+    free(args);
+    return 1;
+}
 
 #ifdef MM_PAGING
     int dma_test_enabled = (getenv("OSSIM_DMA_SELFTEST") != NULL);
@@ -966,25 +1344,46 @@ int main(int argc, char * argv[]) {
         return 1;
     }
 
-	/* Run CPU and loader */
+/* Run CPU and loader */
+int thread_rc;
 
 #ifdef MM_PAGING
-	pthread_create(&ld, NULL, ld_routine, (void*)mm_ld_args);
+    thread_rc = pthread_create(
+        &ld, NULL, ld_routine, (void*)mm_ld_args
+    );
 #else
-	pthread_create(&ld, NULL, ld_routine, (void*)ld_event);
+    thread_rc = pthread_create(
+        &ld, NULL, ld_routine, (void*)ld_event
+    );
 #endif
-	for (i = 0; i < num_cpus; i++) {
-		pthread_create(&cpu[i], NULL,
-			cpu_routine, (void*)&args[i]);
-	}
 
-    /* Wait for CPU and loader finishing */
-    for (i = 0; i < num_cpus; i++) {
-        pthread_join(cpu[i], NULL);
+if (thread_rc != 0) {
+    fprintf(stderr,
+            "[OS] Cannot create loader thread: %s\n",
+            strerror(thread_rc));
+    exit(EXIT_FAILURE);
+}
+for (i = 0; i < num_cpus; i++) {
+    thread_rc = pthread_create(
+        &cpu[i], NULL, cpu_routine, (void*)&args[i]
+    );
+
+    if (thread_rc != 0) {
+        fprintf(stderr,
+                "[OS] Cannot create CPU %d thread: %s\n",
+                i, strerror(thread_rc));
+        exit(EXIT_FAILURE);
     }
+}
+pthread_join(ld, NULL);
 
-    pthread_join(ld, NULL);
+pthread_mutex_lock(&dma_mutex);
 
+while (cpu_finished_processes < num_processes) {
+    pthread_cond_wait(&dma_cond, &dma_mutex);
+}
+
+pthread_mutex_unlock(&dma_mutex);
 
 #ifdef MM_PAGING
     if (dma_test_enabled) {
@@ -1099,6 +1498,40 @@ int main(int argc, char * argv[]) {
     /* Wait until RTL cleanup finishes */
     pthread_join(*dma, NULL);
 
+pthread_mutex_lock(&dma_mutex);
+
+for (;;) {
+    struct dma_request *req;
+    int pending = (dma_irq_head != NULL);
+
+    for (req = dma_all_head; req != NULL;
+         req = req->all_next) {
+        if (req->state == DMA_REQ_QUEUED ||
+            req->state == DMA_REQ_RUNNING) {
+            pending = 1;
+            break;
+        }
+    }
+
+    if (!pending)
+        break;
+
+    pthread_cond_wait(&dma_cond, &dma_mutex);
+}
+
+/*
+ * No pending DMA work remains. Permit CPU threads
+ * to finish reaping deferred PCBs and exit.
+ */
+cpu_shutdown_requested = 1;
+pthread_cond_broadcast(&dma_cond);
+
+pthread_mutex_unlock(&dma_mutex);
+
+for (i = 0; i < num_cpus; i++) {
+    pthread_join(cpu[i], NULL);
+}
+
 #ifdef MM_PAGING
     if (dma_test_enabled) {
         if (dma_test_submitted &&
@@ -1167,6 +1600,9 @@ int main(int argc, char * argv[]) {
     sysbus_unbind_os_ram();
     /* Stop timer */
     stop_timer();
+
+    free(cpu_alive);
+    cpu_alive = NULL;
 
     free(cpu);
     free(dma);
