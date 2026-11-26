@@ -43,16 +43,20 @@ static int remove_fifo_page(struct mm_struct *mm,
  */
 int enlist_vm_freerg_list(struct mm_struct *mm, struct vm_rg_struct *rg_elmt)
 {
-  struct vm_rg_struct *rg_node = mm->mmap->vm_freerg_list;
+  if(mm == NULL || rg_elmt == NULL)
+    return -1;
 
   if (rg_elmt->rg_start >= rg_elmt->rg_end)
     return -1;
 
-  if (rg_node != NULL)
-    rg_elmt->rg_next = rg_node;
+  struct vm_area_struct *rg_node = get_vma_by_num(mm, rg_elmt->vmaid);
 
+  if (rg_node == NULL)
+    return -1;
+
+  rg_elmt->rg_next = rg_node->vm_freerg_list;
   /* Enlist the new region */
-  mm->mmap->vm_freerg_list = rg_elmt;
+  rg_node->vm_freerg_list = rg_elmt;
 
   return 0;
 }
@@ -150,6 +154,7 @@ int __alloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t *allo
     {
       newrg->rg_start = old_sbrk + size;
       newrg->rg_end = old_sbrk + inc_sz;
+      newrg->vmaid = vmaid;
       newrg->rg_next = NULL;
       if (enlist_vm_freerg_list(caller->mm, newrg) != 0)
         free(newrg);
@@ -170,19 +175,6 @@ int __alloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t *allo
 int __free(struct pcb_t *caller, int vmaid, int rgid)
 {
   pthread_mutex_lock(&mmvm_lock);
-
-    /*
-     * Conservative protection: do not reuse a region
-     * while this process has unfinished DMA requests.
-     *
-     * Checking under mmvm_lock prevents concurrent
-     * libmem_dma_memcpy() submission through this API.
-     */
-    if (caller != NULL &&
-        dma_process_has_pending(caller->pid)) {
-        pthread_mutex_unlock(&mmvm_lock);
-        return -1;
-    }
 
   struct vm_area_struct *cur_vma ;
   struct vm_rg_struct *rgnode;
@@ -205,6 +197,22 @@ int __free(struct pcb_t *caller, int vmaid, int rgid)
   if (rgnode == NULL || rgnode->rg_start >= rgnode->rg_end || rgnode->vmaid != vmaid){
     pthread_mutex_unlock(&mmvm_lock);
     return -1;
+  }
+
+#ifdef MM64
+  addr_t start_pgn = PAGING64_PGN(rgnode->rg_start);
+  addr_t end_pgn   = PAGING64_PGN(rgnode->rg_end - 1);
+#else
+  addr_t start_pgn = PAGING_PGN(rgnode->rg_start);
+  addr_t end_pgn   = PAGING_PGN(rgnode->rg_end - 1);
+#endif
+
+  for (addr_t pgn = start_pgn; pgn <= end_pgn; pgn++) {
+    uint64_t pte = pte_get_entry(caller->mm, pgn, caller);
+    if (PAGING_PAGE_PRESENT(pte) && dma_frame_is_pinned(PAGING_FPN(pte))) {
+      pthread_mutex_unlock(&mmvm_lock);
+      return -1;
+    }
   }
 
   freerg_node = malloc(sizeof(struct vm_rg_struct));
@@ -240,26 +248,43 @@ int __free(struct pcb_t *caller, int vmaid, int rgid)
  */
 int liballoc(struct pcb_t *proc, addr_t size, uint32_t reg_index)
 {
+  if(proc == NULL || proc->mm == NULL || size == 0 || reg_index >= PAGING_MAX_SYMTBL_SZ)
+    return -1;
+
   addr_t  addr;
-  int val = __alloc(proc, 0, reg_index, size, &addr);
+  int vmaid = 0;
+  addr_t alloc_sz = size;
+
+#ifdef MM64
+  vmaid = mm64_vmaid_for_size(size);
+  if(vmaid < 0)
+  {
+    return -1;
+  }
+  alloc_sz = mm64_align_size(vmaid, size);
+  if(alloc_sz < size)
+  {
+    return -1;
+  }
+#endif
+
+  int val = __alloc(proc, vmaid, reg_index, alloc_sz, &addr);
   if (val == -1)
   {
     return -1;
   }
+
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
   printf("PHYSICAL MEMORY AFTER ALLOCATION\n");
-printf("liballoc: allocated %lu bytes at 0x%016lx for reg_index %u\n",
-       (unsigned long)size,
+  printf("liballoc: allocated %lu bytes at 0x%016lx for reg_index %u\n",
+       (unsigned long)alloc_sz,
        (unsigned long)addr,
        (unsigned int)reg_index);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
   MEMPHY_dump(proc->krnl->mram);
 #endif
-
-  /* By default using vmaid = 0 */
   return val;
 }
 
@@ -271,22 +296,31 @@ printf("liballoc: allocated %lu bytes at 0x%016lx for reg_index %u\n",
 
 int libfree(struct pcb_t *proc, uint32_t reg_index)
 {
-  int val = __free(proc, 0, reg_index);
+  if(proc == NULL || proc->mm == NULL || reg_index >= PAGING_MAX_SYMTBL_SZ)
+  {
+    return -1;
+  }
+
+  struct vm_rg_struct *rgnode = get_symrg_byid(proc->mm, reg_index);
+  if(rgnode == NULL || rgnode->rg_start >= rgnode->rg_end || rgnode->vmaid < 0)
+  {
+    return -1;
+  }
+
+  int val = __free(proc, rgnode->vmaid, reg_index);
   if (val == -1)
   {
     return -1;
   }
-printf("%s:%d\n",__func__,__LINE__);
+
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
   printf("PHYSICAL MEMORY AFTER FREEING\n");
-  printf("libfree: freed memory for reg_index %d\n", reg_index);
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
   MEMPHY_dump(proc->krnl->mram);
 #endif
-  return 0;//val;
+  return 0;
 }
 
 /*pg_getpage - get the page in ram
@@ -395,6 +429,11 @@ int pg_getval(struct mm_struct *mm, addr_t addr, BYTE *data, struct pcb_t *calle
   if(mm == NULL || data == NULL || caller == NULL)
     return -1;  
 
+#ifdef MM64
+  if(PAGING64_IS_PAGEZERO_ADDR(addr))
+    return -1;
+#endif
+
   if (pg_getpage(mm, pgn, &fpn, caller) != 0)
     return -1; /* invalid page access */
 
@@ -447,6 +486,11 @@ int pg_setval(struct mm_struct *mm, addr_t addr, BYTE value, struct pcb_t *calle
 
   if(mm == NULL || caller == NULL)
     return -1;
+
+#ifdef MM64
+  if(PAGING64_IS_PAGEZERO_ADDR(addr))
+    return -1;
+#endif
 
   /* Get the page to MEMRAM, swap from MEMSWAP if needed */
   if (pg_getpage(mm, pgn, &fpn, caller) != 0)
@@ -510,23 +554,24 @@ int __read(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE *data)
 
 /*libread - PAGING-based read a region memory */
 
-int libread(struct pcb_t *proc,
-            uint32_t source,
-            addr_t offset,
-            uint32_t *destination)
+int libread(struct pcb_t *proc, uint32_t source, addr_t offset, uint32_t *destination)
 {
-    BYTE data = 0;
-    int val;
+  BYTE data = 0;
+  int val;
 
-    if (proc == NULL || destination == NULL)
-        return -1;
+  if (proc == NULL || proc -> mm == NULL || destination == NULL)
+    return -1;
 
-    val = __read(proc, 0, source, offset, &data);
+  struct vm_rg_struct *rgnode = get_symrg_byid(proc->mm, source);
+  if (rgnode == NULL || rgnode->rg_start >= rgnode->rg_end || rgnode->vmaid < 0 || offset >= (rgnode->rg_end - rgnode->rg_start))
+    return -1;
 
-    if (val != 0)
-        return val;
+  val = __read(proc, rgnode->vmaid, source, offset, &data);
 
-    *destination = data;
+  if (val != 0)
+    return val;
+
+  *destination = data;
 
 #ifdef IODUMP
 #ifdef PAGETBL_DUMP
@@ -578,15 +623,21 @@ int libwrite(
     uint32_t destination, // Index of destination register
     addr_t offset)
 {
-  int val = __write(proc, 0, destination, offset, data);
+  if(proc == NULL || proc->mm == NULL || destination >= PAGING_MAX_SYMTBL_SZ)
+    return -1;
+
+  struct vm_rg_struct *rgnode = get_symrg_byid(proc->mm, destination);
+  if(rgnode == NULL || rgnode->rg_start >= rgnode->rg_end || rgnode->vmaid < 0 || offset >= (rgnode->rg_end - rgnode->rg_start))
+    return -1;  
+    
+  int val = __write(proc, rgnode->vmaid, destination, offset, data);
   if (val == -1)
   {
     return -1;
   }
 #ifdef IODUMP
-  /* TODO dump IO content (if needed) */
 #ifdef PAGETBL_DUMP
-  print_pgtbl(proc, 0, -1); // print max TBL
+  print_pgtbl(proc, 0, -1); 
 #endif
 #endif
 
@@ -1329,7 +1380,13 @@ int find_victim_page(struct mm_struct *mm,
  */
 int get_free_vmrg_area(struct pcb_t *caller, int vmaid, int size, struct vm_rg_struct *newrg)
 {
+
+  if(caller == NULL || caller->mm == NULL || newrg == NULL || size <= 0)
+    return -1;
   struct vm_area_struct *cur_vma = get_vma_by_num(caller->mm, vmaid);
+
+  if(cur_vma == NULL)
+    return -1;
 
   struct vm_rg_struct *rgit = cur_vma->vm_freerg_list;
 
