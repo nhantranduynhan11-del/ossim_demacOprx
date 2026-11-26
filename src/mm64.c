@@ -281,6 +281,18 @@ static addr_t *pgtbl_find_pte(struct mm_struct *mm, struct pcb_t *caller,
   addr_t addr = PAGING64_PGN_TO_ADDR(pgn);
   addr_t *root = pgtbl_root(mm, caller, addr, &owner);
 
+  /* PAGEZERO is never mapped: any user access there is a fault
+   * (this is how a NULL pointer dereference is caught) */
+  if (PAGING64_IS_PAGEZERO_ADDR(addr))
+  {
+    if (owner != NULL)
+    {
+      owner->pgstat.nr_walk++;
+      owner->pgstat.nr_fault++;
+    }
+    return NULL;
+  }
+
   return pgtbl_walk(root, owner, addr, alloc);
 }
 
@@ -400,6 +412,10 @@ int mm64_dma_pin_user_page(struct pcb_t *caller,
     /* MM64 user addresses must be canonical. */
     if (!PAGING64_IS_CANONICAL(user_va) ||
         PAGING64_IS_KERNEL_ADDR(user_va))
+        return -1;
+
+    /* DMA must never target PAGEZERO */
+    if (mm64_is_pagezero_addr(user_va))
         return -1;
 
     /* User addresses occupy the lower canonical half. */
@@ -557,6 +573,10 @@ int vmap_pgd_memset(struct pcb_t *caller,           // process call
 
 /*
  * vma_id_of - id of the vm area containing @addr (0 if none)
+ *   Areas are half-open [vm_start, vm_end): with three adjacent user zones
+ *   the first byte of Medium (0x100000) belongs to Medium, not to Small.
+ *   The fallback 0 is the only VMA of the kernel mm, whose vm_end is only
+ *   raised by __kmalloc after the new pages are mapped.
  */
 static int vma_id_of(struct mm_struct *mm, addr_t addr)
 {
@@ -564,7 +584,7 @@ static int vma_id_of(struct mm_struct *mm, addr_t addr)
 
   while (vma != NULL)
   {
-    if (addr >= vma->vm_start && addr <= vma->vm_end)
+    if (addr >= vma->vm_start && addr < vma->vm_end)
       return (int)vma->vm_id;
     vma = vma->vm_next;
   }
@@ -818,15 +838,58 @@ int __swap_cp_page(struct memphy_struct *mpsrc, addr_t srcfpn,
 }
 
 /*
+ * mm64_new_vma - create one empty VMA [start, end) owned by @mm
+ *   sbrk starts at vm_start; the free-region list holds one empty region
+ *   [start, start) so "only memory below sbrk may be reused".
+ */
+static struct vm_area_struct *mm64_new_vma(struct mm_struct *mm, int id,
+                                           addr_t start, addr_t end)
+{
+  struct vm_area_struct *vma = malloc(sizeof(struct vm_area_struct));
+  struct vm_rg_struct *first_rg;
+
+  if (vma == NULL)
+    return NULL;
+
+  vma->vm_id = id;
+  vma->vm_start = start;
+  vma->vm_end = end;
+  vma->sbrk = start;
+  vma->vm_freerg_list = NULL;
+  vma->vm_next = NULL;
+  vma->vm_mm = mm;
+
+  first_rg = init_vm_rg(start, start);
+  if (first_rg == NULL)
+  {
+    free(vma);
+    return NULL;
+  }
+  first_rg->vmaid = id;
+  enlist_vm_rg_node(&vma->vm_freerg_list, first_rg);
+
+  return vma;
+}
+
+/*
  *Initialize a empty Memory Management instance
  * @mm:     self mm
  * @caller: mm owner (NULL = the kernel mm, its area starts at KERNEL_BASE_ADDR)
+ *
+ * @Role B macOS-style layout:
+ *   user   : PAGEZERO [0x0,0x1000) is left unmapped, then three heap zones
+ *            vma0 SMALL -> vma1 MEDIUM -> vma2 LARGE (see mm64.h)
+ *   kernel : one VMA starting at KERNEL_BASE_ADDR, grown by __kmalloc
  */
 int init_mm(struct mm_struct *mm, struct pcb_t *caller)
 {
-  struct vm_area_struct *vma0;
-  struct vm_rg_struct *first_rg;
-  addr_t base;
+  static const struct { int id; addr_t start, end; } user_zone[PAGING64_USER_NR_VMA] = {
+    { PAGING64_VMA_SMALL,  PAGING64_SMALL_START,  PAGING64_SMALL_END  },
+    { PAGING64_VMA_MEDIUM, PAGING64_MEDIUM_START, PAGING64_MEDIUM_END },
+    { PAGING64_VMA_LARGE,  PAGING64_LARGE_START,  PAGING64_LARGE_END  },
+  };
+  struct vm_area_struct *vma, **link;
+  int i;
 
   if (mm == NULL)
     return -1;
@@ -844,37 +907,92 @@ int init_mm(struct mm_struct *mm, struct pcb_t *caller)
   mm->pmd = NULL;
   mm->pt = NULL;
 
-  vma0 = malloc(sizeof(struct vm_area_struct));
-  if (vma0 == NULL)
-    return -1;
+  /* kernel mm: a single VMA, empty for now ([base, base)) */
+  if (caller == NULL)
+  {
+    mm->mmap = mm64_new_vma(mm, 0, (addr_t)KERNEL_BASE_ADDR, (addr_t)KERNEL_BASE_ADDR);
+    return (mm->mmap != NULL) ? 0 : -1;
+  }
 
-  /* user processes start at VA 0, the kernel mm at the kernel base */
-base = (caller == NULL) ? (addr_t)KERNEL_BASE_ADDR : 0;
-
-vma0->vm_id = 0;
-vma0->vm_start = base;
-
-/* Test-only: 16 MiB virtual address limit for user processes */
-vma0->vm_end = (caller == NULL)
-             ? base
-             : (addr_t)0x01000000ULL;
-
-vma0->sbrk = vma0->vm_start;
-vma0->vm_freerg_list = NULL;
-
-/* Only memory below sbrk may be reused */
-first_rg = init_vm_rg(vma0->vm_start, vma0->sbrk);
-enlist_vm_rg_node(&vma0->vm_freerg_list, first_rg);
-  /* update VMA0 next */
-  vma0->vm_next = NULL;
-
-  /* Point vma owner backward */
-  vma0->vm_mm = mm;
-
-  /* update mmap (symrgtbl, fifo_pgn, kcpooltbl were cleared above) */
-  mm->mmap = vma0;
+  /* user mm: vma0 -> vma1 -> vma2, PAGEZERO is never part of a VMA */
+  link = &mm->mmap;
+  for (i = 0; i < PAGING64_USER_NR_VMA; i++)
+  {
+    vma = mm64_new_vma(mm, user_zone[i].id, user_zone[i].start, user_zone[i].end);
+    if (vma == NULL)
+      return -1;
+    *link = vma;
+    link = &vma->vm_next;
+  }
 
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* @Role B - macOS-style layout helpers                                 */
+/* ------------------------------------------------------------------ */
+
+/* mm64_is_pagezero_addr - 1 if @addr lies in PAGEZERO [0x0, 0x1000) */
+int mm64_is_pagezero_addr(addr_t addr)
+{
+  return PAGING64_IS_PAGEZERO_ADDR(addr) ? 1 : 0;
+}
+
+/* mm64_range_in_pagezero - 1 if [start, end) touches PAGEZERO */
+int mm64_range_in_pagezero(addr_t start, addr_t end)
+{
+  if (end <= start)
+    return mm64_is_pagezero_addr(start);
+  return (start < (addr_t)PAGING64_PAGEZERO_END) ? 1 : 0;
+}
+
+/* mm64_vmaid_for_size - zone of an allocation: <=512 Small, <=4096 Medium,
+ * else Large; -1 for a zero size */
+int mm64_vmaid_for_size(addr_t size)
+{
+  if (size == 0)
+    return -1;
+  if (size <= PAGING64_SMALL_MAX_SZ)
+    return PAGING64_VMA_SMALL;
+  if (size <= PAGING64_MEDIUM_MAX_SZ)
+    return PAGING64_VMA_MEDIUM;
+  return PAGING64_VMA_LARGE;
+}
+
+/* mm64_vma_align - allocation quantum of a zone, 0 for an unknown id */
+addr_t mm64_vma_align(int vmaid)
+{
+  switch (vmaid)
+  {
+  case PAGING64_VMA_SMALL:  return PAGING64_SMALL_ALIGN;
+  case PAGING64_VMA_MEDIUM: return PAGING64_MEDIUM_ALIGN;
+  case PAGING64_VMA_LARGE:  return PAGING64_LARGE_ALIGN;
+  default:                  return 0;
+  }
+}
+
+/* mm64_align_size - @size rounded up to the quantum of @vmaid
+ * (0 for an unknown id or when rounding overflows) */
+addr_t mm64_align_size(int vmaid, addr_t size)
+{
+  addr_t a = mm64_vma_align(vmaid);
+  addr_t r;
+
+  if (a == 0)
+    return 0;
+  r = PAGING64_ALIGN_UP(size, a);
+  return (r < size) ? 0 : r;
+}
+
+const char *mm64_vma_name(int vmaid)
+{
+  switch (vmaid)
+  {
+  case PAGING64_VMA_SMALL:  return "SMALL";
+  case PAGING64_VMA_MEDIUM: return "MEDIUM";
+  case PAGING64_VMA_LARGE:  return "LARGE";
+  default:                  return "?";
+  }
 }
 
 /*
@@ -1056,6 +1174,92 @@ int print_pgtbl_stat(struct mm_struct *mm, uint32_t pid)
 }
 
 /*
+ * zone_name_of_va - macOS-style zone of a user address (for the dumps)
+ */
+static const char *zone_name_of_va(addr_t va)
+{
+  if (PAGING64_IS_KERNEL_ADDR(va))
+    return "KERNEL";
+  if (PAGING64_IS_PAGEZERO_ADDR(va))
+    return "PAGEZERO";
+  if (va >= PAGING64_SMALL_START && va < PAGING64_SMALL_END)
+    return "SMALL";
+  if (va >= PAGING64_MEDIUM_START && va < PAGING64_MEDIUM_END)
+    return "MEDIUM";
+  if (va >= PAGING64_LARGE_START && va < PAGING64_LARGE_END)
+    return "LARGE";
+  return "OTHER";
+}
+
+/*
+ * __print_mm_layout - one line per zone of @mm (pgtbl_lock must be held)
+ *   used  = sbrk - vm_start (bytes handed out by the heap so far)
+ *   pages = pages of [vm_start, sbrk) resident in RAM / in SWAP
+ *   free  = bytes waiting in the zone's free-region list
+ */
+static int __print_mm_layout(struct mm_struct *mm, uint32_t pid)
+{
+  struct vm_area_struct *vma;
+  int is_krnl;
+
+  if (mm == NULL || mm->mmap == NULL)
+    return -1;
+
+  is_krnl = PAGING64_IS_KERNEL_ADDR(mm->mmap->vm_start);
+  if (!is_krnl)
+    printf(" [LAYOUT] PID %u PAGEZERO [0x%08" PRIx64 ",0x%08" PRIx64 ") never mapped, no access\n",
+           pid, (uint64_t)PAGING64_PAGEZERO_START, (uint64_t)PAGING64_PAGEZERO_END);
+
+  for (vma = mm->mmap; vma != NULL; vma = vma->vm_next)
+  {
+    uint64_t resident = 0, swapped = 0, free_bytes = 0;
+    struct vm_rg_struct *rg;
+    addr_t va;
+
+    for (va = vma->vm_start - PAGING64_OFFST(vma->vm_start); va < vma->sbrk; va += PAGING64_PAGESZ)
+    {
+      /* quiet look-up (owner NULL): no statistics, no cache update;
+       * the kernel mm's pgd is krnl_pgd, so this works for both */
+      addr_t *pte = pgtbl_walk(mm->pgd, NULL, va, 0);
+      if (pte == NULL || *pte == 0)
+        continue;
+      if (PAGING_PAGE_PRESENT(*pte))
+        resident++;
+      else if (*pte & PAGING_PTE_SWAPPED_MASK)
+        swapped++;
+    }
+
+    for (rg = vma->vm_freerg_list; rg != NULL; rg = rg->rg_next)
+      if (rg->rg_end > rg->rg_start)
+        free_bytes += rg->rg_end - rg->rg_start;
+
+    printf(" [LAYOUT] PID %u vma%lu %-6s [0x%08" PRIx64 ",0x%08" PRIx64 ") align=%-4" PRIu64
+           " sbrk=0x%08" PRIx64 " used=%" PRIu64 "/%" PRIu64 "B pages=%" PRIu64
+           " swapped=%" PRIu64 " free=%" PRIu64 "B\n",
+           pid, (unsigned long)vma->vm_id,
+           is_krnl ? "KERNEL" : mm64_vma_name((int)vma->vm_id),
+           (uint64_t)vma->vm_start, (uint64_t)vma->vm_end,
+           (uint64_t)(is_krnl ? PAGING64_PAGESZ : mm64_vma_align((int)vma->vm_id)),
+           (uint64_t)vma->sbrk, (uint64_t)(vma->sbrk - vma->vm_start),
+           (uint64_t)(vma->vm_end - vma->vm_start), resident, swapped, free_bytes);
+  }
+  return 0;
+}
+
+/*
+ * print_mm_layout - print the zones of @mm and how much of each is used
+ */
+int print_mm_layout(struct mm_struct *mm, uint32_t pid)
+{
+  int ret;
+
+  pthread_mutex_lock(&pgtbl_lock);
+  ret = __print_mm_layout(mm, pid);
+  pthread_mutex_unlock(&pgtbl_lock);
+  return ret;
+}
+
+/*
  * pgtbl_dump - print every leaf entry of a (sub)tree inside [start, end]
  * @tbl    : table at level @lvl
  * @prefix : virtual address covered by entry 0 of @tbl
@@ -1093,8 +1297,9 @@ static int pgtbl_dump(addr_t *tbl, int lvl, addr_t prefix, int from, int to,
       addr_t ix[PAGING64_LEVELS];
       get_pd_from_address(va, &ix[0], &ix[1], &ix[2], &ix[3], &ix[4]);
       printf("  va=0x%016" PRIx64 " pgn=0x%" PRIx64 " [PGD %03" PRIx64 "|P4D %03" PRIx64
-             "|PUD %03" PRIx64 "|PMD %03" PRIx64 "|PT %03" PRIx64 "] ",
-             (uint64_t)va, (uint64_t)PAGING64_PGN(va), ix[0], ix[1], ix[2], ix[3], ix[4]);
+             "|PUD %03" PRIx64 "|PMD %03" PRIx64 "|PT %03" PRIx64 "] %-6s ",
+             (uint64_t)va, (uint64_t)PAGING64_PGN(va), ix[0], ix[1], ix[2], ix[3], ix[4],
+             zone_name_of_va(va));
       if (PAGING_PAGE_PRESENT(ent))
         printf("-> fpn %" PRIu64 " (pa=0x%" PRIx64 ")\n", (uint64_t)PAGING_FPN(ent),
                (uint64_t)PAGING64_PHYADDR(PAGING_FPN(ent), 0));
@@ -1157,6 +1362,7 @@ int print_pgtbl(struct pcb_t *caller, addr_t start, addr_t end)
     printf("  (no page mapped)\n");
 
   print_pgtbl_stat(mm, caller->pid);
+  __print_mm_layout(mm, caller->pid);
 
   pthread_mutex_unlock(&pgtbl_lock);
   return 0;

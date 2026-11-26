@@ -101,6 +101,54 @@
 /* Error code returned by alloc_pages_range() when RAM has not enough frames */
 #define PAGING64_ERR_OOM  (-3000)
 
+/*
+ * @Role B - macOS-style user address space layout (HK261, spec page 31)
+ *
+ *   Every range is [start, end): addr >= start && addr < end.
+ *
+ *   0x0000000000000000  PAGEZERO  4 KB  no access (catches NULL pointers)
+ *   0x0000000000001000  reserved for __TEXT/__LINKEDIT (code is not kept
+ *                       in RAM by this simulator), never mapped
+ *   0x0000000000010000  vma0 SMALL    960 KB  size <= 512 B,   align 16 B
+ *   0x0000000000100000  vma1 MEDIUM     4 MB  size <= 4096 B,  align 256 B
+ *   0x0000000000500000  vma2 LARGE     11 MB  size >  4096 B,  align 4096 B
+ *   0x0000000001000000  end of the user heap zones (16 MB)
+ *
+ *   The kernel mm keeps one VMA that starts at KERNEL_BASE_ADDR.
+ */
+#define PAGING64_PAGEZERO_START   0x0000000000000000ULL
+#define PAGING64_PAGEZERO_END     0x0000000000001000ULL
+
+#define PAGING64_VMA_SMALL        0
+#define PAGING64_VMA_MEDIUM       1
+#define PAGING64_VMA_LARGE        2
+#define PAGING64_USER_NR_VMA      3
+
+#define PAGING64_SMALL_START      0x0000000000010000ULL
+#define PAGING64_SMALL_END        0x0000000000100000ULL
+#define PAGING64_MEDIUM_START     0x0000000000100000ULL
+#define PAGING64_MEDIUM_END       0x0000000000500000ULL
+#define PAGING64_LARGE_START      0x0000000000500000ULL
+#define PAGING64_LARGE_END        0x0000000001000000ULL
+
+/* Size thresholds: size <= SMALL_MAX -> Small, <= MEDIUM_MAX -> Medium,
+ * larger -> Large */
+#define PAGING64_SMALL_MAX_SZ     512
+#define PAGING64_MEDIUM_MAX_SZ    4096
+
+/* Allocation alignment (quantum) of each zone */
+#define PAGING64_SMALL_ALIGN      16
+#define PAGING64_MEDIUM_ALIGN     256
+#define PAGING64_LARGE_ALIGN      PAGING64_PAGESZ
+
+/* Round @sz up to @a (a power of two) */
+#define PAGING64_ALIGN_UP(sz, a) \
+	((((addr_t)(sz)) + ((addr_t)(a) - 1)) & ~((addr_t)(a) - 1))
+
+/* PAGEZERO check usable in macros and #if-free code */
+#define PAGING64_IS_PAGEZERO_ADDR(addr) \
+	(((addr_t)(addr)) < (addr_t)PAGING64_PAGEZERO_END)
+
 /* @Role B - extra 5-level paging services */
 int init_krnl_pgtbl(struct krnl_t *krnl);
 int free_pcb_pgtbl(struct pcb_t *caller);
@@ -118,5 +166,14 @@ int mm64_dma_pin_kernel_page(struct pcb_t *caller,
                              uint64_t *physical_addr);
 int print_pgtbl_stat(struct mm_struct *mm, uint32_t pid);
 uint64_t pgtbl_size_bytes(struct mm_struct *mm);
+
+/* @Role B - layout helpers (macOS-style zones) */
+int mm64_is_pagezero_addr(addr_t addr);            /* 1 if addr in PAGEZERO  */
+int mm64_range_in_pagezero(addr_t start, addr_t end); /* 1 if [start,end) touches it */
+int mm64_vmaid_for_size(addr_t size);              /* SMALL/MEDIUM/LARGE, -1 if 0 */
+addr_t mm64_vma_align(int vmaid);                  /* quantum of a zone, 0 if bad */
+addr_t mm64_align_size(int vmaid, addr_t size);    /* size rounded to the quantum */
+const char *mm64_vma_name(int vmaid);
+int print_mm_layout(struct mm_struct *mm, uint32_t pid);
 
 #endif

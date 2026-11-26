@@ -109,6 +109,11 @@ syscalltbl.lst: $(SRC)/syscall.tbl
 os: $(OBJ) syscalltbl.lst $(OS_OBJ)
 	$(CXX) $(LFLAGS) $(OS_OBJ) -o os $(LIB) -lpthread
 
+# Role B: standalone test of the 5-level page table and the macOS layout
+# (links only mm64.o, brings its own MEMPHY and DMA-pin stubs)
+mm64test: $(OBJ) $(OBJ)/mm64.o test/mm64_test.c
+	$(MAKE) $(LFLAGS) test/mm64_test.c $(OBJ)/mm64.o -o mm64test $(LIB)
+
 $(OBJ)/%.o: %.c ${HEADER} $(OBJ)
 	$(MAKE) $(CFLAGS) $< -o $@
 
@@ -133,5 +138,5 @@ $(OBJ):
 
 clean:
 	rm -f $(SRC)/*.lst
-	rm -f $(OBJ)/*.o os sched mem pdg dma_testbench *.vcd
+	rm -f $(OBJ)/*.o os sched mem pdg dma_testbench mm64test *.vcd
 	rm -rf $(OBJ)

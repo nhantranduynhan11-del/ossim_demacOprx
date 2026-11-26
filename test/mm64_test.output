@@ -1,0 +1,152 @@
+==== Role B: 64-bit 5-level paging + macOS layout test ====
+
+[T1] Address split (example of the assignment, Table 2)
+  VA 0x39ffe1d9c9000 -> PGD 0x003 P4D 0x13f PUD 0x1f8 PMD 0x0ec PT 0x1c9 OFF 0x000
+  [PASS] indices = 0x03 / 0x13f / 0x1f8 / 0x0ec / 0x1c9 as in the spec
+  [PASS] get_pd_from_pagenum(pgn) gives the same indices as get_pd_from_address(va)
+  [PASS] each index is 9 bits (max 0x1ff = 511 -> 512 entries per table)
+  [PASS] one table = 512 entries x 8 B = 4096 B = 1 page
+
+[T2] init_mm: macOS-style zones, kernel keeps one VMA
+  [PASS] a new process owns only its PGD (1 table = 4096 B)
+  [PASS] vma0 SMALL  = [0x10000, 0x100000), sbrk at start
+  [PASS] vma1 MEDIUM = [0x100000, 0x500000)
+  [PASS] vma2 LARGE  = [0x500000, 0x1000000), end of list
+  [PASS] each zone owns its free-region list tagged with its vmaid
+  [PASS] no VMA overlaps PAGEZERO [0x0, 0x1000)
+  [PASS] kernel mm: one VMA at KERNEL_BASE_ADDR 0xff00000000000000
+  [PASS] kernel tree built at boot: krnl_pgd -> p4d -> pud -> pmd -> pt
+  [PASS] kernel half starts at PGD index 256
+
+[T3] Layout helpers: zone by size, quantum, PAGEZERO
+  [PASS] 1 B and 512 B -> SMALL
+  [PASS] 513 B and 4096 B -> MEDIUM
+  [PASS] 4097 B -> LARGE, 0 B -> -1
+  [PASS] alignment: 100->112 (16 B), 300->512 (256 B), 5000->8192 (4 KB), bad id -> 0
+  [PASS] PAGEZERO = [0x0, 0x1000): 0x0 and 0xfff yes, 0x1000 and kernel no
+  [PASS] a range crossing 0x1000 touches PAGEZERO, [0x1000,0x2000) does not
+
+[T4] PAGEZERO is never mapped
+  [PASS] vm_map_ram at VA 0 is refused
+  [PASS] no frame taken and no table created
+  [PASS] pte_set_fpn / pte_get_entry on pgn 0 fail (NULL-pointer page)
+  [PASS] PAGEZERO accesses counted as faults
+
+[T5] vm_map_ram: P1 maps 3 pages at the start of SMALL
+  [PASS] vm_map_ram returns 0
+  [PASS] ret_rg = [0x10000, 0x13000), vmaid 0 (SMALL)
+  [PASS] 3 RAM frames were taken
+  [PASS] tables now: PGD+P4D+PUD+PMD+PT = 5 (20 KB)
+  [PASS] pgn 0x10 present -> fpn 0
+  [PASS] pgn 0x11 present -> fpn 1
+  [PASS] pgn 0x12 present -> fpn 2
+  [PASS] MMU: VA 0x11234 -> PA 0x1234 (frame of page 0x11 + offset 0x234)
+  [PASS] user pages enlisted in fifo_pgn for page replacement
+
+[T6] Zone boundaries are half-open [start, end)
+  [PASS] first page of MEDIUM (0x100000) gets vmaid 1, not SMALL's 0
+  [PASS] SMALL and MEDIUM pages share the same PT (both in the first 2 MB): still 5 tables
+  [PASS] first page of LARGE (0x500000) gets vmaid 2
+  [PASS] LARGE starts in the 3rd 2 MB region: +1 PT -> 6 tables = 24 KB
+
+[T7] Isolation: P2 also maps the first SMALL page
+  [PASS] P2 vm_map_ram OK
+  [PASS] same VA 0x10010 -> P1 PA 0x10, P2 PA 0x5010 (separate trees)
+
+[T8] Sparse address: P1 maps 1 page at VA 0x39ffe1d9c9000
+  [PASS] vm_map_ram OK
+  [PASS] only 4 new tables (P4D,PUD,PMD,PT) for that far region
+  [PASS] VA 0x39ffe1d9c9abc -> PA 0x6abc
+  note: a flat 1-level table for 2^45 pages would need 2^45 x 8 B = 256 TiB
+
+[T9] Look-up of an unmapped page never allocates tables
+  [PASS] PTE = 0, table count unchanged
+  [PASS] counted as a fault (page fault path)
+
+[T10] Swap: pte_set_swap / pte_set_fpn / __swap_cp_page
+  [PASS] page content copied RAM frame 2 -> SWAP frame 0
+  [PASS] pte_set_swap(pgn 0x12, type 0, off 0)
+  [PASS] PTE: present=0 swapped=1 type=0 off=0
+  [PASS] MMU refuses VA 0x12000 (page is not in RAM)
+  [PASS] pte_set_fpn brings page 0x12 back to frame 2
+
+[T11] Kernel space (VA >= 0xff00000000000000) is shared by every process
+  [PASS] P1 maps 1 kernel page
+  [PASS] no table added to P1's private tree
+  [PASS] P2 sees the very same kernel PTE (fpn 7)
+  [PASS] P1 PGD[256] stays empty (routed to krnl_pgd)
+  [PASS] kernel page is not a swap victim candidate
+
+[T12] Canonical address check
+  [PASS] VA 0x0100000000000000 (bits 63..57 != bit 56) is rejected
+  [PASS] 0x00FF..F000 (user top) and 0xFF00..0000 (kernel base) are canonical
+
+[T13] DMA pinning refuses PAGEZERO
+  [PASS] mm64_dma_pin_user_page(VA 0x10) = -1, nothing pinned
+  [PASS] a resident SMALL address is pinned (PA 0x20)
+
+[T14] Memory accesses: page-walk cache vs full walk
+  100 translations inside one 2MB region (SMALL):
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=2 PUD=2 PMD=2 PT=3 size=40960B | walks=100 pt-mem-access=104 (1.04/walk) pwc-hit=99 faults=0
+  [PASS] 1 full walk (5 accesses) + 99 cache hits (1 access) = 104 vs 500 without cache
+  100 translations alternating SMALL / MEDIUM (same PT):
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=2 PUD=2 PMD=2 PT=3 size=40960B | walks=100 pt-mem-access=104 (1.04/walk) pwc-hit=99 faults=0
+  [PASS] SMALL and MEDIUM share a PT -> 99 hits
+  100 translations alternating between two far regions:
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=2 PUD=2 PMD=2 PT=3 size=40960B | walks=100 pt-mem-access=500 (5.00/walk) pwc-hit=0 faults=0
+  [PASS] worst case: every walk misses the cache -> 5 accesses each
+
+[T15] vmap_pgd_memset reserves PTEs without frames
+  [PASS] reserve 2 pages at VA 0x700000 (LARGE)
+  [PASS] PTE = 0x0ead8000 (reserved, not present)
+  [PASS] reserving PAGEZERO is refused
+
+[T16] Out of memory is all-or-nothing
+[mm64] vm_map_ram: PID 2 out of RAM frames (need 9)
+  [PASS] asking 9 frames with 8 free fails
+  [PASS] no frame leaked (8 still free)
+
+[T17] print_pgtbl(P1, 0, -1): pages, statistics and layout
+print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
+ PDG=00000220d8b6df40 P4D=00000220d8b74400 PUD=00000220d8b75410 PMD=00000220d8b76420 PT=00000220d8b77430
+  va=0x0000000000010000 pgn=0x10 [PGD 000|P4D 000|PUD 000|PMD 000|PT 010] SMALL  -> fpn 0 (pa=0x0)
+  va=0x0000000000011000 pgn=0x11 [PGD 000|P4D 000|PUD 000|PMD 000|PT 011] SMALL  -> fpn 1 (pa=0x1000)
+  va=0x0000000000012000 pgn=0x12 [PGD 000|P4D 000|PUD 000|PMD 000|PT 012] SMALL  -> fpn 2 (pa=0x2000)
+  va=0x0000000000100000 pgn=0x100 [PGD 000|P4D 000|PUD 000|PMD 000|PT 100] MEDIUM -> fpn 3 (pa=0x3000)
+  va=0x0000000000500000 pgn=0x500 [PGD 000|P4D 000|PUD 000|PMD 002|PT 100] LARGE  -> fpn 4 (pa=0x4000)
+  va=0x0000000000700000 pgn=0x700 [PGD 000|P4D 000|PUD 000|PMD 003|PT 100] LARGE  -> reserved (pte=0x0ead8000)
+  va=0x0000000000701000 pgn=0x701 [PGD 000|P4D 000|PUD 000|PMD 003|PT 101] LARGE  -> reserved (pte=0x0ead8000)
+  va=0x00039ffe1d9c9000 pgn=0x39ffe1d9c9 [PGD 003|P4D 13f|PUD 1f8|PMD 0ec|PT 1c9] OTHER  -> fpn 6 (pa=0x6000)
+  va=0xff00000000000000 pgn=0xff00000000000 [PGD 100|P4D 000|PUD 000|PMD 000|PT 000] KERNEL -> fpn 7 (pa=0x7000)
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=2 PUD=2 PMD=2 PT=4 size=45056B | walks=104 pt-mem-access=507 (4.88/walk) pwc-hit=2 faults=1
+ [LAYOUT] PID 1 PAGEZERO [0x00000000,0x00001000) never mapped, no access
+ [LAYOUT] PID 1 vma0 SMALL  [0x00010000,0x00100000) align=16   sbrk=0x00013000 used=12288/983040B pages=3 swapped=0 free=0B
+ [LAYOUT] PID 1 vma1 MEDIUM [0x00100000,0x00500000) align=256  sbrk=0x00101000 used=4096/4194304B pages=1 swapped=0 free=0B
+ [LAYOUT] PID 1 vma2 LARGE  [0x00500000,0x01000000) align=4096 sbrk=0x00501000 used=4096/11534336B pages=1 swapped=0 free=0B
+  [PASS] dump printed
+
+[T18] free_pcb_pgtbl: process exit gives everything back
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=2 PUD=2 PMD=2 PT=4 size=45056B | walks=104 pt-mem-access=507 (4.88/walk) pwc-hit=2 faults=1
+ [PGTBL-FREE] PID 1: released 6 RAM frame(s), 0 swap frame(s), 45056B of page tables
+  [PASS] P1 address space released
+  [PASS] 6 RAM frames of P1 returned (14 free)
+  [PASS] kernel page still mapped for P2 (kernel tree is not freed by a process)
+ [PGTBL-STAT] PID 2: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=2 pt-mem-access=6 (3.00/walk) pwc-hit=1 faults=0
+ [PGTBL-FREE] PID 2: released 1 RAM frame(s), 0 swap frame(s), 20480B of page tables
+
+[T19] 4 threads map 32 kernel + 32 user pages each, concurrently
+  [PASS] all 256 mappings done (errors=0, missing=0)
+  [PASS] no RAM frame handed out twice (duplicates=0)
+  [PASS] free frames left = 16 (expected 16)
+  kernel tree statistics (shared by the 4 processes):
+ [PGTBL-STAT] PID 0: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=263 pt-mem-access=267 (1.02/walk) pwc-hit=262 faults=0
+ [PGTBL-STAT] PID 10: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=64 pt-mem-access=68 (1.06/walk) pwc-hit=63 faults=0
+ [PGTBL-FREE] PID 10: released 32 RAM frame(s), 0 swap frame(s), 20480B of page tables
+ [PGTBL-STAT] PID 11: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=64 pt-mem-access=68 (1.06/walk) pwc-hit=63 faults=0
+ [PGTBL-FREE] PID 11: released 32 RAM frame(s), 0 swap frame(s), 20480B of page tables
+ [PGTBL-STAT] PID 12: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=64 pt-mem-access=68 (1.06/walk) pwc-hit=63 faults=0
+ [PGTBL-FREE] PID 12: released 32 RAM frame(s), 0 swap frame(s), 20480B of page tables
+ [PGTBL-STAT] PID 13: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=64 pt-mem-access=68 (1.06/walk) pwc-hit=63 faults=0
+ [PGTBL-FREE] PID 13: released 32 RAM frame(s), 0 swap frame(s), 20480B of page tables
+
+==== RESULT: 72 passed, 0 failed ====
