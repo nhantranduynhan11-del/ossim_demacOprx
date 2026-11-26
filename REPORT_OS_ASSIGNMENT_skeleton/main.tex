@@ -1,0 +1,295 @@
+\documentclass[12pt,a4paper]{article}
+%\usepackage[utf8]{vietnam}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{enumitem}
+\pgfplotsset{compat=1.18}
+\usepackage{tabularx}
+
+% Thiết lập header và footer
+\pagestyle{fancy}
+\fancyhf{}
+
+\fancyhead[L]{%
+	\begin{minipage}{0.4\textwidth}
+		\includegraphics[width=\linewidth]{bk_name_vi.png}
+	\end{minipage}
+}
+\fancyhead[R]{%
+	\begin{minipage}{0.8\textwidth}
+		\raggedleft
+
+	\end{minipage}
+}
+\renewcommand{\headrulewidth}{0.5pt}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true
+}
+\fancyfoot[L]{\small\textit{Báo cáo Bài tập lớn Hệ điều hành (TN)}}
+\fancyfoot[R]{\small\textbf{Trang \thepage/\pageref{LastPage}}}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Thiết lập cho trang title
+\fancypagestyle{titlepage}{
+	\fancyhf{}
+	\renewcommand{\headrulewidth}{0pt}
+	\renewcommand{\footrulewidth}{0pt}
+}
+
+% ===========================================================
+% Ô GIỮ CHỖ: in chữ xám, ghi người viết và việc cần viết.
+% Viết xong phần nào thì XÓA dòng \viet{...}{...} của phần đó.
+% ===========================================================
+\newcommand{\viet}[2]{\par\noindent\textcolor{gray}{\textit{[#1] #2}}\par\medskip}
+
+\begin{document}
+
+	%========================= TITLE PAGE =========================
+	\begin{titlepage}
+		\centering
+
+		{\large ĐẠI HỌC QUỐC GIA THÀNH PHỐ HỒ CHÍ MINH\\}
+		{\large TRƯỜNG ĐẠI HỌC BÁCH KHOA\\}
+
+		\includegraphics[width=0.65\linewidth]{01_logobachkhoasang.png}\\[0.5cm]
+
+		{\large \textbf{HỆ ĐIỀU HÀNH (THÍ NGHIỆM) - CO2018}\\[0.3cm]}
+
+		\noindent\makebox[\textwidth]{\rule{16cm}{0.4pt}}
+		{\LARGE \textbf{BÁO CÁO}\\}
+		{\LARGE \textbf{BÀI TẬP LỚN - ossim\_demacOprx}}\\
+		\noindent\makebox[\textwidth]{\rule{16cm}{0.4pt}}
+
+		{\large GVHD: Nguyễn Tuấn Huy\\[1.2cm]}
+
+		{\large Lớp: L01 \quad Nhóm: 08\\[0.6cm]}
+
+		{\large\begin{center}
+			\begin{tabular}{>{\bfseries}c c}
+				Hoàng Phạm Tiến Thành & 2413148 \\
+				Trần Duy Nhân & 2412439 \\
+				Đặng Bá Khôi & 2411679 \\
+				Huỳnh Nguyễn Yến Linh & 2411871 \\
+			\end{tabular}
+		\end{center}
+		}
+		\vfill
+		{\large TP. Hồ Chí Minh, tháng 11 năm 2026}
+
+	\end{titlepage}
+
+	\tableofcontents
+
+	% ===========================================================
+	% LỜI MỞ ĐẦU
+	% ===========================================================
+	\newpage
+	\section*{Lời Mở Đầu}
+	\addcontentsline{toc}{section}{Lời Mở Đầu}
+
+	Nhóm chúng em gửi lời cảm ơn đến thầy Nguyễn Tuấn Huy đã tận tình giảng dạy và hướng dẫn chúng em trong quá trình học môn Hệ điều hành. Bài báo cáo dưới đây tóm tắt các nội dung chính mà nhóm đã hiện thực trong bài tập lớn môn Hệ điều hành ``ossim\_demacOprx'', gồm bộ lập lịch, quản lý bộ nhớ, phân trang đa cấp, giao tiếp user/kernel space và co-processor DMA.
+
+	\viet{Khôi}{Rà lại lời mở đầu sau khi các phần đã xong, bổ sung 1--2 câu tóm tắt điểm nổi bật của nhóm nếu cần.}
+
+	% ===========================================================
+	% 1. GIỚI THIỆU VÀ PHÂN CÔNG — KHÔI
+	% ===========================================================
+	\section{Giới thiệu và phân công}
+
+	\subsection{Môi trường và cách chạy}
+	\viet{Khôi}{Môi trường build (Verilator), lệnh \texttt{make os}, \texttt{./os <input>}, các cấu hình đang bật trong \texttt{os-cfg.h} (MLQ\_SCHED, MM\_PAGING, MM64).}
+
+	\subsection{Phân công công việc}
+	\begin{table}[H]
+	\centering\small
+	\begin{tabularx}{\linewidth}{|l|c|X|}
+	\hline
+	\textbf{Thành viên} & \textbf{MSSV} & \textbf{Phần phụ trách} \\
+	\hline
+	Hoàng Phạm Tiến Thành & 2413148 & \textcolor{gray}{\textit{[Thành] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	Trần Duy Nhân & 2412439 & \textcolor{gray}{\textit{[Nhân] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	Đặng Bá Khôi & 2411679 & \textcolor{gray}{\textit{[Khôi] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	Huỳnh Nguyễn Yến Linh & 2411871 & \textcolor{gray}{\textit{[Linh] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	\end{tabularx}
+	\caption{Phân công công việc}
+	\end{table}
+
+	% ===========================================================
+	% 2. SCHEDULER — KHÔI
+	% ===========================================================
+	\section{Scheduling}
+
+	\subsection{Hiện thực MLQ}
+	\viet{Khôi}{Cấu trúc \texttt{queue\_t}, cách hiện thực \texttt{enqueue()}, \texttt{dequeue()}, \texttt{purgequeue()}, \texttt{get\_mlq\_proc()}; cơ chế \texttt{slot = MAX\_PRIO - prio}; khóa bảo vệ hàng đợi.}
+
+	\subsection{Gantt}
+	\viet{Khôi}{Biểu đồ Gantt cho \texttt{sched}, \texttt{sched\_0}, \texttt{sched\_1} vẽ từ output của bản code cuối (27/11). Giải thích ngắn thứ tự dispatch.}
+	% \begin{figure}[H]
+	%     \centering
+	%     \includegraphics[width=0.8\linewidth]{figures/khoi_sched_gantt.png}
+	%     \caption{Gantt của test sched}
+	% \end{figure}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{Considering the impactness of MLQ detailed policies, what is the benefit of each policy?}
+	    \viet{Khôi}{Trả lời Q3, liên hệ với output Gantt của nhóm.}
+
+	    \item \textbf{When a system call executes too long time, how does the Operating system detect and handle the case?}
+	    \viet{Khôi}{Trả lời Q2, liên hệ timer và time slice trong simulator.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 3. MEMORY LAYOUT KIỂU MACOS — NHÂN
+	% ===========================================================
+	\section{Memory Layout}
+
+	\subsection{Bố cục vùng nhớ}
+	\viet{Nhân}{Bảng layout theo kiểu macOS: PAGEZERO, vùng Small, Medium, Large, vùng kernel (\texttt{KERNEL\_BASE\_ADDR}). Mỗi dòng ghi địa chỉ bắt đầu, kết thúc, kích thước, căn chỉnh, mô tả.}
+	\begin{table}[H]
+	\centering\small
+	\begin{tabularx}{\linewidth}{|l|l|l|l|X|}
+	\hline
+	\textbf{Vùng} & \textbf{Bắt đầu} & \textbf{Kết thúc} & \textbf{Kích thước} & \textbf{Mô tả} \\
+	\hline
+	 & & & & \\
+	\hline
+	\end{tabularx}
+	\caption{Bố cục bộ nhớ ảo của một tiến trình}
+	\label{tab:memory_layout}
+	\end{table}
+
+	\subsection{Lý do thiết kế}
+	\viet{Nhân}{Vì sao chia 3 vùng theo kích thước (tham khảo bảng macOS trang 31 của đề), vì sao chọn ngưỡng 512 B / 4096 B và căn chỉnh 16 B / 256 B / 4096 B, lợi ích cho DMA. So sánh ngắn với layout Linux của học kỳ trước.}
+
+	% ===========================================================
+	% 4. QUẢN LÝ BỘ NHỚ ẢO — LINH
+	% ===========================================================
+	\section{Virtual Memory Management}
+
+	\subsection{ALLOC và FREE}
+	\viet{Linh}{Luồng ALLOC: tìm vùng trống trong \texttt{vm\_freerg\_list}, không có thì nới \texttt{sbrk} qua \texttt{inc\_vma\_limit}, map trang. Luồng FREE: trả vùng vào danh sách vùng trống.}
+
+	\subsection{Phân vùng theo kích thước}
+	\viet{Linh}{\texttt{liballoc} chọn vùng Small, Medium, Large theo size, làm tròn căn chỉnh; \texttt{libfree}, \texttt{libread}, \texttt{libwrite} lấy \texttt{vmaid} từ \texttt{symrgtbl}; \texttt{\_\_free} chỉ chặn khi frame của vùng đang bị DMA ghim.}
+
+	\subsection{Trạng thái cấp phát}
+	\viet{Linh}{Bảng hoặc hình trạng thái các vùng sau từng lệnh alloc/free của một test chạy trên bản code cuối.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
+	    \viet{Linh}{Trả lời Q4, liên hệ VMA (phân đoạn) + bảng trang (phân trang) trong code.}
+
+	    \item \textbf{What are the advantages and disadvantages of paging and contiguous memory allocation?}
+	    \viet{Linh}{Trả lời Q6.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 5. PHÂN TRANG ĐA CẤP — NHÂN
+	% ===========================================================
+	\section{Multi-level Paging}
+
+	\subsection{Sơ đồ phân giải địa chỉ}
+	\viet{Nhân}{Cấu trúc địa chỉ 5 cấp (PGD, P4D, PUD, PMD, PT, offset) và một ví dụ tách một địa chỉ thật của nhóm thành 5 chỉ số; hàm \texttt{get\_pd\_from\_address()}, \texttt{pte\_get\_entry()}.}
+
+	\subsection{Thống kê truy cập bộ nhớ và kích thước bảng trang}
+	\viet{Nhân}{Số liệu từ \texttt{print\_pgtbl\_stat} trên bản code cuối: số lần truy cập bộ nhớ cho một lần dịch địa chỉ, số bảng đã cấp phát, tổng dung lượng bảng trang.}
+
+	\subsection{Lợi ích thiết kế}
+	\viet{Nhân}{Cấp phát bảng trang theo nhu cầu, đánh đổi số lần truy cập lấy dung lượng.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What are the benefits of extending hierarchical paging to N level?}
+	    \viet{Nhân}{Trả lời Q5.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 6. MMU VÀ USER/KERNEL SPACE — THÀNH
+	% ===========================================================
+	\section{MMU and User/Kernel Spaces}
+
+	\subsection{Giao tiếp user/kernel qua PID}
+	\viet{Thành}{Syscall chỉ nhận PID, kernel tự tìm PCB; trích đoạn code chứng minh không truyền PCB trực tiếp.}
+
+	\subsection{Truy cập bộ nhớ user và kernel}
+	\viet{Thành}{\texttt{\_\_read\_user\_mem}, \texttt{\_\_write\_user\_mem}: chặn địa chỉ kernel và PAGEZERO; \texttt{copy\_from\_user}, \texttt{copy\_to\_user}; output một lần truy cập địa chỉ kernel bị từ chối.}
+
+	\subsection{Swapping}
+	\viet{Thành}{Luồng \texttt{pg\_getpage}: peek victim, swap có kiểm tra lỗi, rồi mới remove khỏi FIFO; bỏ qua frame đang bị DMA ghim.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What are the advantages and disadvantages of using the unified system call interface for manipulating different system components, i.e. read/write/free for files, memory and I/O devices?}
+	    \viet{Thành}{Trả lời Q1: thiết kế OS, hiệu năng, xử lý lỗi, tính di động; liên hệ syscall \texttt{memmap} gom nhiều thao tác.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 7. CO-PROCESSOR DMA — KHÔI (7.1) + THÀNH (7.2)
+	% ===========================================================
+	\section{Co-processor}
+
+	\subsection{Cơ chế bất đồng bộ và ngắt}
+	\viet{Khôi}{Sơ đồ: CPU giao việc, chạy tiếp process khác, \texttt{co\_processor} chép xong gửi \texttt{SIGUSR1}, CPU chạy \texttt{handle\_dma\_irq()}. Vì sao signal handler chỉ đặt cờ; \texttt{deferred\_pcb\_list}; output test chứng minh CPU không bị chặn.}
+
+	\subsection{Bus addressing: DMA truy cập bộ nhớ}
+	\viet{Thành}{\texttt{libmem\_dma\_memcpy}: kéo trang từ SWAP lên rồi ghim, chia đoạn theo trang, submit không chờ; output một lần DMA vắt qua nhiều trang.}
+
+	% ===========================================================
+	% 8. ĐỒNG BỘ HÓA — THÀNH
+	% ===========================================================
+	\section{Synchronization}
+
+	\subsection{Tài nguyên dùng chung và khóa}
+	\viet{Thành}{Bảng: tài nguyên dùng chung (hàng đợi, running\_list, RAM, SWAP, bảng trang, danh sách pin DMA, hàng đợi IRQ) và khóa bảo vệ tương ứng.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What happens if the synchronization is not handled in your Simple OS? Illustrate the problem of your simple OS (assignment outputs) by example if you have any in the added kernel memory operations.}
+	    \viet{Thành}{Trả lời Q7, dùng kịch bản 2 CPU swap đúng frame đang được DMA chép.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 9. KẾT LUẬN — LINH
+	% ===========================================================
+	\section{Kết luận}
+	\viet{Linh}{Những gì nhóm đã làm được, hạn chế, hướng mở rộng.}
+
+	% ===========================================================
+	% TÀI LIỆU THAM KHẢO
+	% ===========================================================
+	\begin{thebibliography}{9}
+
+	\bibitem{osc10}
+	Abraham Silberschatz, Peter Baer Galvin, and Greg Gagne.
+	\newblock \textit{Operating System Concepts}, 10th Edition.
+	\newblock Wiley, 2018.
+
+	\end{thebibliography}
+
+\end{document}
