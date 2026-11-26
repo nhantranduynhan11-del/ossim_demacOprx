@@ -42,14 +42,6 @@ static int __read_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
 static int __write_user_mem_locked(struct pcb_t *caller, int vmaid, int rgid,
                                    addr_t offset, BYTE value);
 
-/* TẠM – gỡ khi Nhân merge: dùng hằng/hàm PAGEZERO chính thức trong include/mm64.h */
-#ifndef PAGING64_PAGEZERO_END
-#define PAGING64_PAGEZERO_END 0x1000ULL
-#endif
-#ifndef PAGING64_IS_PAGEZERO_ADDR
-#define PAGING64_IS_PAGEZERO_ADDR(addr) ((addr_t)(addr) < (addr_t)PAGING64_PAGEZERO_END)
-#endif
-
 /*enlist_vm_freerg_list - add new rg to freerg_list
  *@mm: memory region
  *@rg_elmt: new region
@@ -952,9 +944,7 @@ int libmem_dma_memcpy(struct pcb_t *caller,
         return -1;
     }
 
-    /* TẠM – gỡ điều kiện (src_vma->vm_start >= PAGING64_PAGEZERO_END) khi Nhân merge 3 VMA */
-    if (src_vma->vm_start >= PAGING64_PAGEZERO_END &&
-        PAGING64_IS_PAGEZERO_ADDR(src_start)) {
+    if (PAGING64_IS_PAGEZERO_ADDR(src_start)) {
         pthread_mutex_unlock(&kmm_lock);
         pthread_mutex_unlock(&mmvm_lock);
         return -1;
@@ -1349,8 +1339,7 @@ static int user_rg_to_va(struct pcb_t *caller, int vmaid, int rgid,
 #ifdef MM64
     if (PAGING64_IS_KERNEL_ADDR(addr))
         return -1;
-    /* TẠM – gỡ điều kiện (vma->vm_start >= PAGING64_PAGEZERO_END) khi Nhân merge 3 VMA */
-    if (vma->vm_start >= PAGING64_PAGEZERO_END && PAGING64_IS_PAGEZERO_ADDR(addr))
+    if (PAGING64_IS_PAGEZERO_ADDR(addr))
         return -1;
 #endif
 
