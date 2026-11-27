@@ -150,6 +150,11 @@
 	(((addr_t)(addr)) < (addr_t)PAGING64_PAGEZERO_END)
 
 /* @Role B - extra 5-level paging services */
+/* Take @req_pgnum physically consecutive, zero-filled RAM frames (ascending
+ * in @frm_lst); vm_map_ram() uses it for every kernel address (KMALLOC).
+ * Return 0 or PAGING64_ERR_OOM. */
+addr_t alloc_contig_pages_range(struct pcb_t *caller, int req_pgnum,
+                                struct framephy_struct **frm_lst);
 int init_krnl_pgtbl(struct krnl_t *krnl);
 int free_pcb_pgtbl(struct pcb_t *caller);
 /*

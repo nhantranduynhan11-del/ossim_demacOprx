@@ -650,6 +650,29 @@ addr_t vmap_page_range(struct pcb_t *caller,           // process call
  * (all-or-nothing: the frames already taken are given back).
  */
 
+/*
+ * mm64_zero_frame - zero-fill-on-demand (Ch.9, free-frame list):
+ *   clear a RAM frame right before it is handed to a new owner, so the
+ *   data of a process that released this frame never leaks to the next one.
+ *   pgtbl_lock must be held (the frame was just taken from the free list).
+ */
+static void mm64_zero_frame(struct memphy_struct *mp, addr_t fpn)
+{
+  addr_t base, i;
+
+  if (mp == NULL || mp->storage == NULL || mp->maxsz <= 0)
+    return;
+  if (fpn >= (addr_t)mp->maxsz / PAGING64_PAGESZ)
+    return;
+
+  base = fpn * PAGING64_PAGESZ;
+  if (mp->rdmflg)
+    memset(mp->storage + base, 0, PAGING64_PAGESZ);
+  else
+    for (i = 0; i < PAGING64_PAGESZ; i++)
+      MEMPHY_write(mp, base + i, 0);
+}
+
 addr_t alloc_pages_range(struct pcb_t *caller, int req_pgnum, struct framephy_struct **frm_lst)
 {
   addr_t fpn;
@@ -687,6 +710,9 @@ for (pgit = 0; pgit < req_pgnum; pgit++)
         break;
     }
 
+    /* zero-fill-on-demand: no data of the previous owner survives */
+    mm64_zero_frame(mram, fpn);
+
     newfp_str->fpn = fpn;
     newfp_str->owner = caller->mm;
     newfp_str->fp_next = NULL;
@@ -716,6 +742,119 @@ for (pgit = 0; pgit < req_pgnum; pgit++)
 
   *frm_lst = head;
   return 0;
+}
+
+/*
+ * alloc_contig_pages_range - take @req_pgnum PHYSICALLY CONSECUTIVE frames
+ *   fpn, fpn+1, ..., fpn+req_pgnum-1 from RAM (first fit, lowest frame).
+ *
+ *   KMALLOC must return physically contiguous memory (spec section 1.3):
+ *   devices such as the DMA engine address RAM directly, so a kernel
+ *   buffer cannot be scattered over frames (Ch.9, allocating kernel
+ *   memory: buddy/slab hand out physically contiguous pages).
+ *
+ *   The free list is unordered, so the free frames are first marked in a
+ *   bitmap, the first long-enough run is searched, then exactly those
+ *   frames are unlinked from the free list. All-or-nothing.
+ *
+ * Return 0 and the frames in ascending order in @frm_lst, or
+ * PAGING64_ERR_OOM when no run of @req_pgnum free frames exists
+ * (even if enough frames are free in total).
+ */
+addr_t alloc_contig_pages_range(struct pcb_t *caller, int req_pgnum,
+                                struct framephy_struct **frm_lst)
+{
+  struct memphy_struct *mram;
+  struct framephy_struct **nodes = NULL, *fp, **link;
+  unsigned char *is_free = NULL;
+  addr_t nframes, f, run = 0, start = 0, found = 0;
+  int i, ok = 0;
+
+  if (frm_lst == NULL)
+    return (addr_t)-1;
+  *frm_lst = NULL;
+
+  if (caller == NULL || caller->krnl == NULL || caller->krnl->mram == NULL)
+    return (addr_t)-1;
+  if (req_pgnum <= 0)
+    return 0;
+
+  mram = caller->krnl->mram;
+  nframes = (mram->maxsz > 0) ? (addr_t)mram->maxsz / PAGING64_PAGESZ : 0;
+  if (nframes > (addr_t)PAGING_PTE_FPN_MASK + 1)
+    nframes = (addr_t)PAGING_PTE_FPN_MASK + 1; /* the FPN must fit the PTE */
+  if ((addr_t)req_pgnum > nframes)
+    return (addr_t)PAGING64_ERR_OOM;
+
+  /* bookkeeping first, so nothing can fail after frames are unlinked */
+  is_free = calloc(nframes, 1);
+  nodes = calloc((size_t)req_pgnum, sizeof(*nodes));
+  if (is_free == NULL || nodes == NULL)
+    goto out_free;
+  for (i = 0; i < req_pgnum; i++)
+    if ((nodes[i] = malloc(sizeof(struct framephy_struct))) == NULL)
+      goto out_free;
+
+  pthread_mutex_lock(&pgtbl_lock);
+
+  for (fp = mram->free_fp_list; fp != NULL; fp = fp->fp_next)
+    if (fp->fpn < nframes)
+      is_free[fp->fpn] = 1;
+
+  for (f = 0; f < nframes; f++)
+  {
+    if (!is_free[f])
+    {
+      run = 0;
+      continue;
+    }
+    if (run == 0)
+      start = f;
+    if (++run == (addr_t)req_pgnum)
+    {
+      found = start;
+      ok = 1;
+      break;
+    }
+  }
+
+  if (ok)
+  {
+    /* unlink frames [found, found + req_pgnum) from the free list */
+    link = &mram->free_fp_list;
+    while (*link != NULL)
+    {
+      fp = *link;
+      if (fp->fpn >= found && fp->fpn < found + (addr_t)req_pgnum)
+      {
+        *link = fp->fp_next;
+        free(fp);
+      }
+      else
+        link = &fp->fp_next;
+    }
+
+    /* hand them out in ascending order, zero-filled */
+    for (i = 0; i < req_pgnum; i++)
+    {
+      nodes[i]->fpn = found + (addr_t)i;
+      nodes[i]->owner = caller->krnl->mm;
+      nodes[i]->fp_next = (i + 1 < req_pgnum) ? nodes[i + 1] : NULL;
+      mm64_zero_frame(mram, found + (addr_t)i);
+    }
+    *frm_lst = nodes[0];
+  }
+
+  pthread_mutex_unlock(&pgtbl_lock);
+
+out_free:
+  if (!ok && nodes != NULL)
+    for (i = 0; i < req_pgnum; i++)
+      free(nodes[i]);
+  free(nodes);
+  free(is_free);
+
+  return ok ? 0 : (addr_t)PAGING64_ERR_OOM;
 }
 
 /*
@@ -758,13 +897,22 @@ addr_t vm_map_ram(struct pcb_t *caller, addr_t astart, addr_t aend, addr_t mapst
    *in endless procedure of swap-off to get frame and we have not provide
    *duplicate control mechanism, keep it simple
    */
-  ret_alloc = (int64_t)alloc_pages_range(caller, incpgnum, &frm_lst);
+  /* Kernel memory (KMALLOC) must be physically contiguous; user pages are
+   * paged, so any free frames will do */
+  if (PAGING64_IS_KERNEL_ADDR(mapstart))
+    ret_alloc = (int64_t)alloc_contig_pages_range(caller, incpgnum, &frm_lst);
+  else
+    ret_alloc = (int64_t)alloc_pages_range(caller, incpgnum, &frm_lst);
 
   /* Out of memory */
   if (ret_alloc == PAGING64_ERR_OOM)
   {
-    printf("[mm64] %s: PID %u out of RAM frames (need %d)\n",
-           __func__, caller->pid, incpgnum);
+    if (PAGING64_IS_KERNEL_ADDR(mapstart))
+      printf("[mm64] %s: PID %u no %d physically contiguous free frames for kernel memory\n",
+             __func__, caller->pid, incpgnum);
+    else
+      printf("[mm64] %s: PID %u out of RAM frames (need %d)\n",
+             __func__, caller->pid, incpgnum);
     return (addr_t)-1;
   }
 
