@@ -1,0 +1,492 @@
+\documentclass[12pt,a4paper]{article}
+%\usepackage[utf8]{vietnam}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{enumitem}
+\pgfplotsset{compat=1.18}
+\usepackage{tabularx}
+\setlist[itemize]{leftmargin=*,itemsep=3pt,topsep=4pt}
+\setlist[enumerate]{leftmargin=*,itemsep=4pt,topsep=4pt}
+
+% Thiết lập header và footer
+\pagestyle{fancy}
+\fancyhf{}
+
+\fancyhead[L]{%
+	\begin{minipage}{0.4\textwidth}
+		\includegraphics[width=\linewidth]{bk_name_vi.png}
+	\end{minipage}
+}
+\fancyhead[R]{%
+	\begin{minipage}{0.8\textwidth}
+		\raggedleft
+
+	\end{minipage}
+}
+\renewcommand{\headrulewidth}{0.5pt}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true
+}
+\fancyfoot[L]{\small\textit{Báo cáo Bài tập lớn Hệ điều hành (TN)}}
+\fancyfoot[R]{\small\textbf{Trang \thepage/\pageref{LastPage}}}
+\renewcommand{\footrulewidth}{0.5pt}
+
+% Thiết lập cho trang title
+\fancypagestyle{titlepage}{
+	\fancyhf{}
+	\renewcommand{\headrulewidth}{0pt}
+	\renewcommand{\footrulewidth}{0pt}
+}
+
+% ===========================================================
+% Ô GIỮ CHỖ: in chữ xám, ghi người viết và việc cần viết.
+% Viết xong phần nào thì XÓA dòng \viet{...}{...} của phần đó.
+% ===========================================================
+\newcommand{\viet}[2]{\par\noindent\textcolor{gray}{\textit{[#1] #2}}\par\medskip}
+
+\begin{document}
+
+	%========================= TITLE PAGE =========================
+	\begin{titlepage}
+		\centering
+
+		{\large ĐẠI HỌC QUỐC GIA THÀNH PHỐ HỒ CHÍ MINH\\}
+		{\large TRƯỜNG ĐẠI HỌC BÁCH KHOA\\}
+
+		\includegraphics[width=0.65\linewidth]{01_logobachkhoasang.png}\\[0.5cm]
+
+		{\large \textbf{HỆ ĐIỀU HÀNH (THÍ NGHIỆM) - CO2018}\\[0.3cm]}
+
+		\noindent\makebox[\textwidth]{\rule{16cm}{0.4pt}}
+		{\LARGE \textbf{BÁO CÁO}\\}
+		{\LARGE \textbf{BÀI TẬP LỚN - ossim\_demacOprx}}\\
+		\noindent\makebox[\textwidth]{\rule{16cm}{0.4pt}}
+
+		{\large GVHD: Nguyễn Tuấn Huy\\[1.2cm]}
+
+		{\large Lớp: L01 \quad Nhóm: 08\\[0.6cm]}
+
+		{\large\begin{center}
+			\begin{tabular}{>{\bfseries}c c}
+				Hoàng Phạm Tiến Thành & 2413148 \\
+				Trần Duy Nhân & 2412439 \\
+				Đặng Bá Khôi & 2411679 \\
+				Huỳnh Nguyễn Yến Linh & 2411871 \\
+			\end{tabular}
+		\end{center}
+		}
+		\vfill
+		{\large TP. Hồ Chí Minh, tháng 11 năm 2026}
+
+	\end{titlepage}
+
+	\tableofcontents
+
+	% ===========================================================
+	% LỜI MỞ ĐẦU — KHÔI
+	% ===========================================================
+	\clearpage
+	\section*{Lời Mở Đầu}
+	\addcontentsline{toc}{section}{Lời Mở Đầu}
+
+	Hệ điều hành là thành phần quan trọng giúp quản lý tài nguyên phần cứng và điều phối hoạt động của các chương trình. Những kiến thức như lập lịch CPU, quản lý bộ nhớ, phân trang hay đồng bộ hóa sẽ dễ hiểu hơn khi được áp dụng vào một chương trình mô phỏng cụ thể. Trong khuôn khổ môn học Hệ điều hành (CO2018), nhóm chúng em thực hiện bài tập lớn \texttt{ossim\_demacOprx} dựa trên mã nguồn được cung cấp và các yêu cầu của học kỳ HK261. Mục tiêu của nhóm không chỉ là hoàn thiện các chức năng được giao mà còn là tìm hiểu cách chúng phối hợp với nhau trong quá trình thực thi. Qua việc đọc mã nguồn, chỉnh sửa từng thành phần, biên dịch và chạy các trường hợp kiểm thử, nhóm có cơ hội tiếp cận gần hơn với những vấn đề thực tế khi xây dựng một hệ điều hành, đặc biệt là việc quản lý trạng thái tiến trình và tài nguyên dùng chung.
+
+	Trong bài tập lớn này, nhóm tập trung vào một số nội dung chính. Bộ lập lịch \textit{Multi-Level Queue} (MLQ) tổ chức tiến trình theo các hàng đợi ưu tiên và phân phối lượt chạy trên một hoặc nhiều CPU. Phần quản lý bộ nhớ được mở rộng với bố cục không gian địa chỉ kiểu macOS, cấp phát theo vùng, phân trang đa cấp và cơ chế hoán đổi trang khi cần thiết. Bên cạnh đó, hệ thống mô phỏng sự tách biệt giữa không gian người dùng và không gian nhân, cùng phương thức giao tiếp thông qua các lời gọi hệ thống. Một nội dung
+	đáng chú ý là cơ chế co-processor DMA hoạt động bất đồng bộ: sau khi gửi yêu cầu truyền dữ liệu, CPU có thể tiếp tục thực thi tiến trình khác; khi DMA hoàn tất, thông báo ngắt được chuyển đến CPU để xử lý. Nhóm cũng chú trọng việc giữ lại tài nguyên của tiến trình nếu DMA vẫn đang sử dụng, nhằm tránh giải phóng bộ nhớ quá sớm.
+
+	Báo cáo trình bày cách tổ chức và hiện thực các thành phần trên, đồng thời đối chiếu với kết quả chạy từ phiên bản mã nguồn đã tích hợp của nhóm. Qua quá trình thực hiện, nhóm rèn luyện thêm kỹ năng đọc hiểu chương trình C/C++, phối hợp thay đổi mã nguồn và kiểm tra lỗi trên môi trường Linux. Chúng em xin chân thành cảm ơn thầy Nguyễn Tuấn Huy đã giảng dạy, hướng dẫn và góp ý để nhóm có thể hoàn thành bài tập lớn này. Dù đã cố gắng, báo cáo khó tránh khỏi thiếu sót; nhóm rất mong nhận được thêm nhận xét để có thể hoàn thiện kiến thức và cách triển khai trong thời gian tới.
+
+	% Bắt đầu nội dung chính ở trang mới, không chung trang với Lời mở đầu.
+	\clearpage
+
+	% ===========================================================
+	% 1. GIỚI THIỆU VÀ PHÂN CÔNG — KHÔI
+	% ===========================================================
+	\section{Giới thiệu và phân công}
+
+	\subsection{Môi trường và cách chạy}
+	\begin{itemize}
+	    \item \textbf{Nền tảng:} Ubuntu/Linux; mã nguồn C/C++.
+	    \item \textbf{Công cụ:} Makefile, GCC/G++, thư viện \texttt{pthread} và Verilator cho DMA RTL.
+	    \item \textbf{Cấu hình:} \texttt{MLQ\_SCHED}, \texttt{MM\_PAGING}, \texttt{MM64} bật trong \texttt{include/os-cfg.h}; \texttt{MAX\_PRIO = 140}.
+	    \item \textbf{Cách chạy:} truyền tên cấu hình trong \texttt{input/} cho chương trình \texttt{os}.
+	\end{itemize}
+
+	\begin{lstlisting}[language=bash]
+make clean
+make os
+./os sched
+./os sched_0
+./os sched_1
+./os khoi_dma_nonblocking_test
+./os khoi_dma_deferred_test
+	\end{lstlisting}
+
+	\subsection{Phân công công việc}
+	\begin{table}[H]
+	\centering\small
+	\begin{tabularx}{\linewidth}{|l|c|X|}
+	\hline
+	\textbf{Thành viên} & \textbf{MSSV} & \textbf{Phần phụ trách} \\
+	\hline
+	Hoàng Phạm Tiến Thành & 2413148 & \textcolor{gray}{\textit{[Thành] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	Trần Duy Nhân & 2412439 & \textcolor{gray}{\textit{[Nhân] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	Đặng Bá Khôi & 2411679 & Scheduling, xử lý ngắt và DMA bất đồng bộ. \\
+	\hline
+	Huỳnh Nguyễn Yến Linh & 2411871 & \textcolor{gray}{\textit{[Linh] Điền phần code và phần báo cáo phụ trách}} \\
+	\hline
+	\end{tabularx}
+	\caption{Phân công công việc của nhóm}
+	\end{table}
+
+	% ===========================================================
+	% 2. SCHEDULER — KHÔI
+	% ===========================================================
+	\section{Scheduling}
+	\subsection{Hiện thực MLQ}
+
+	\noindent\textbf{Cấu trúc quản lý tiến trình:}
+	\begin{itemize}
+	    \item \texttt{mlq\_ready\_queue[MAX\_PRIO]}: mỗi mức ưu tiên có một hàng đợi riêng.
+	    \item \texttt{running\_list}: lưu các PCB đang được CPU xử lý.
+	    \item \texttt{current\_prio}: mức ưu tiên hiện tại của bộ chọn MLQ.
+	    \item \texttt{slot[p]}: số lượt chọn còn lại của mức ưu tiên \(p\), khởi tạo bằng \(\texttt{MAX\_PRIO}-p\).
+	\end{itemize}
+
+	\noindent\textbf{Các thao tác hàng đợi trong \texttt{src/queue.c}:}
+	\begin{itemize}
+	    \item \texttt{enqueue()}: đưa PCB vào cuối hàng đợi.
+	    \item \texttt{dequeue()}: lấy PCB đầu hàng đợi, bảo đảm nguyên tắc FIFO.
+	    \item \texttt{purgequeue()}: xóa một PCB xác định khỏi hàng đợi.
+	\end{itemize}
+
+	\noindent\textbf{Các bước chọn tiến trình trong \texttt{src/sched.c}:}
+	\begin{enumerate}
+	    \item \texttt{add\_mlq\_proc()} đưa PCB mới vào queue theo \texttt{proc->prio}.
+	    \item \texttt{get\_mlq\_proc()} bắt đầu duyệt từ \texttt{current\_prio}.
+	    \item Nếu queue không rỗng và \texttt{slot[p] > 0}, lấy PCB, thêm vào \texttt{running\_list}, giảm \texttt{slot[p]}.
+	    \item Khi không chọn được tiến trình trong một lượt quét, khởi tạo lại quota và thử thêm một lượt.
+	    \item Hết time slice, \texttt{put\_mlq\_proc()} trả PCB về queue; kết thúc tiến trình thì \texttt{finish\_proc()} gỡ khỏi \texttt{running\_list}.
+	\end{enumerate}
+
+	\noindent\textbf{Time slice và đồng bộ:}
+	\begin{itemize}
+	    \item Trong \texttt{cpu\_routine()}, mỗi lần \texttt{run(proc)} hoàn thành sẽ giảm \texttt{time\_left} một đơn vị.
+	    \item Khi hết lượt chạy, CPU chọn lại tiến trình. \texttt{time\_left} khác với quota \texttt{slot[p]} của MLQ.
+	    \item \texttt{queue\_lock} bảo vệ các thao tác với hàng đợi, \texttt{running\_list}, và trạng thái chọn queue khi nhiều CPU cùng chạy.
+	\end{itemize}
+
+	\subsection{Biểu đồ Gantt}
+	Ba cấu hình sau chạy trên code tích hợp và đều kết thúc với mã thoát 0.
+	\begin{table}[H]
+	\centering\small
+	\begin{tabular}{lrrr}
+	\toprule
+	\textbf{Input} & \textbf{Quantum} & \textbf{CPU} & \textbf{Tiến trình} \\
+	\midrule
+	\texttt{sched} & 4 & 2 & 4 \\
+	\texttt{sched\_0} & 2 & 1 & 4 \\
+	\texttt{sched\_1} & 2 & 1 & 5 \\
+	\bottomrule
+	\end{tabular}
+	\caption{Cấu hình các test lập lịch}
+	\label{tab:khoi-sched-config}
+	\end{table}
+
+	\noindent\textbf{Test \texttt{sched}:}
+	\begin{itemize}
+	    \item CPU 1 nhận PID 1 tại slot 1; CPU 0 nhận PID 2 tại slot 2.
+	    \item Các CPU tiếp tục phân chia lượt xử lý giữa các PID còn lại.
+	    \item Bốn tiến trình đều kết thúc, cho thấy việc dispatch trên 2 CPU.
+	\end{itemize}
+	\begin{figure}[H]
+	    \centering
+	    \includegraphics[width=\linewidth]{figures/khoi_sched_gantt.png}
+	    \caption{sched -- 2 CPU, quantum = 4}
+	    \label{fig:khoi-sched}
+	\end{figure}
+
+	\noindent\textbf{Test \texttt{sched\_0}:}
+	\begin{itemize}
+	    \item PID 1 và PID 2 có cùng mức ưu tiên 4; luân phiên theo quantum 2.
+	    \item PID 3 và PID 4 đến sau, được chọn khi nhóm PID đầu đã kết thúc.
+	    \item Log thể hiện rõ thao tác \texttt{put\_proc()} và chọn lại tiến trình.
+	\end{itemize}
+	\begin{figure}[H]
+	    \centering
+	    \includegraphics[width=\linewidth]{figures/khoi_sched_0_gantt.png}
+	    \caption{sched\_0 -- 1 CPU, quantum = 2}
+	    \label{fig:khoi-sched0}
+	\end{figure}
+
+	\noindent\textbf{Test \texttt{sched\_1}:}
+	\begin{itemize}
+	    \item PID 1 liên tục được chọn lại cho đến khi kết thúc ở slot 15.
+	    \item PID 2--5 sau đó luân phiên theo quantum 2.
+	    \item Quan sát cho thấy độ trễ chờ có thể lớn dù tiến trình đã được nạp.
+	\end{itemize}
+	\begin{figure}[H]
+	    \centering
+	    \includegraphics[width=\linewidth]{figures/khoi_sched_1_gantt.png}
+	    \caption{sched\_1 -- 1 CPU, quantum = 2}
+	    \label{fig:khoi-sched1}
+	\end{figure}
+
+	\noindent\textit{Ghi chú:} các thanh PID được xác định từ các dòng \texttt{Time slot}, \texttt{Dispatched process}, \texttt{Put process} và \texttt{Processed ... has finished}. Nhiều lần dispatch lại cùng PID liên tiếp được thể hiện thành một khoảng. Với 2 CPU, các dòng log có thể xen kẽ do chạy song song.
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+     \item \textbf{Q2 -- When a system call executes too long time, how does the Operating system detect and handle the case?}
+	    \begin{itemize}
+	        \item Hệ điều hành thực: có thể dùng timer, timeout, watchdog hoặc cơ chế hủy tác vụ phù hợp; không nên tùy tiện ngắt mã kernel đang giữ khóa.
+	        \item Simulator hiện tại: \texttt{time\_left} được giảm \emph{sau mỗi lần} \texttt{run(proc)} trở về; hết quantum, CPU gọi \texttt{put\_proc()} để chọn lại.
+	        \item Giới hạn: time slice không phải watchdog để cưỡng bức ngắt một system call không trả về.
+	        \item Với DMA: request được giao cho \texttt{co\_processor()}; CPU tiếp tục chạy và xử lý completion tại \texttt{dma\_handle\_pending\_irqs()} sau tín hiệu \texttt{SIGUSR1}.
+	    \end{itemize}
+        
+	    \item \textbf{Q3 -- Considering the impactness of MLQ detailed policies, what is the benefit of each policy?}
+	    \begin{itemize}
+	        \item Nhiều queue ưu tiên: phân loại tiến trình thành các nhóm điều phối khác nhau.
+	        \item FIFO trong mỗi queue: tiến trình cùng mức được phục vụ theo thứ tự chờ.
+	        \item Đưa về queue khi hết quantum: tạo cơ hội luân phiên giữa các PCB cùng mức.
+	        \item Quota \texttt{slot[p]}: phân bổ lượt chọn giữa các mức ưu tiên.
+	        \item Liên hệ kết quả: \texttt{sched\_0} thể hiện PID 1/2 luân phiên; \texttt{sched\_1} cho thấy tiến trình đến sau có thể chờ lâu. Do đó không khẳng định MLQ có ưu tiên tức thời hay không starvation trong mọi trường hợp.
+	    \end{itemize}
+	\end{enumerate}
+
+	% ===========================================================
+	% 3. MEMORY LAYOUT KIỂU MACOS — NHÂN
+	% ===========================================================
+	\section{Memory Layout}
+
+	\subsection{Bố cục vùng nhớ}
+	\viet{Nhân}{Bảng layout theo kiểu macOS: PAGEZERO, vùng Small, Medium, Large, vùng kernel (\texttt{KERNEL\_BASE\_ADDR}). Mỗi dòng ghi địa chỉ bắt đầu, kết thúc, kích thước, căn chỉnh, mô tả.}
+	\begin{table}[H]
+	\centering\small
+	\begin{tabularx}{\linewidth}{|l|l|l|l|X|}
+	\hline
+	\textbf{Vùng} & \textbf{Bắt đầu} & \textbf{Kết thúc} & \textbf{Kích thước} & \textbf{Mô tả} \\
+	\hline
+	 & & & & \\
+	\hline
+	\end{tabularx}
+	\caption{Bố cục bộ nhớ ảo của một tiến trình}
+	\label{tab:memory_layout}
+	\end{table}
+
+	\subsection{Lý do thiết kế}
+	\viet{Nhân}{Vì sao chia 3 vùng theo kích thước (tham khảo bảng macOS trang 31 của đề), vì sao chọn ngưỡng 512 B / 4096 B và căn chỉnh 16 B / 256 B / 4096 B, lợi ích cho DMA. So sánh ngắn với layout Linux của học kỳ trước.}
+
+	% ===========================================================
+	% 4. QUẢN LÝ BỘ NHỚ ẢO — LINH
+	% ===========================================================
+	\section{Virtual Memory Management}
+
+	\subsection{ALLOC và FREE}
+	\viet{Linh}{Luồng ALLOC: tìm vùng trống trong \texttt{vm\_freerg\_list}, không có thì nới \texttt{sbrk} qua \texttt{inc\_vma\_limit}, map trang. Luồng FREE: trả vùng vào danh sách vùng trống.}
+
+	\subsection{Phân vùng theo kích thước}
+	\viet{Linh}{\texttt{liballoc} chọn vùng Small, Medium, Large theo size, làm tròn căn chỉnh; \texttt{libfree}, \texttt{libread}, \texttt{libwrite} lấy \texttt{vmaid} từ \texttt{symrgtbl}; \texttt{\_\_free} chỉ chặn khi frame của vùng đang bị DMA ghim.}
+
+	\subsection{Trạng thái cấp phát}
+	\viet{Linh}{Bảng hoặc hình trạng thái các vùng sau từng lệnh alloc/free của một test chạy trên bản code cuối.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
+	    \viet{Linh}{Trả lời Q4, liên hệ VMA (phân đoạn) + bảng trang (phân trang) trong code.}
+
+	    \item \textbf{What are the advantages and disadvantages of paging and contiguous memory allocation?}
+	    \viet{Linh}{Trả lời Q6.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 5. PHÂN TRANG ĐA CẤP — NHÂN
+	% ===========================================================
+	\section{Multi-level Paging}
+
+	\subsection{Sơ đồ phân giải địa chỉ}
+	\viet{Nhân}{Cấu trúc địa chỉ 5 cấp (PGD, P4D, PUD, PMD, PT, offset) và một ví dụ tách một địa chỉ thật của nhóm thành 5 chỉ số; hàm \texttt{get\_pd\_from\_address()}, \texttt{pte\_get\_entry()}.}
+
+	\subsection{Thống kê truy cập bộ nhớ và kích thước bảng trang}
+	\viet{Nhân}{Số liệu từ \texttt{print\_pgtbl\_stat} trên bản code cuối: số lần truy cập bộ nhớ cho một lần dịch địa chỉ, số bảng đã cấp phát, tổng dung lượng bảng trang.}
+
+	\subsection{Lợi ích thiết kế}
+	\viet{Nhân}{Cấp phát bảng trang theo nhu cầu, đánh đổi số lần truy cập lấy dung lượng.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What are the benefits of extending hierarchical paging to N level?}
+	    \viet{Nhân}{Trả lời Q5.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 6. MMU VÀ USER/KERNEL SPACE — THÀNH
+	% ===========================================================
+	\section{MMU and User/Kernel Spaces}
+
+	\subsection{Giao tiếp user/kernel qua PID}
+	\viet{Thành}{Syscall chỉ nhận PID, kernel tự tìm PCB; trích đoạn code chứng minh không truyền PCB trực tiếp.}
+
+	\subsection{Truy cập bộ nhớ user và kernel}
+	\viet{Thành}{\texttt{\_\_read\_user\_mem}, \texttt{\_\_write\_user\_mem}: chặn địa chỉ kernel và PAGEZERO; \texttt{copy\_from\_user}, \texttt{copy\_to\_user}; output một lần truy cập địa chỉ kernel bị từ chối.}
+
+	\subsection{Swapping}
+	\viet{Thành}{Luồng \texttt{pg\_getpage}: peek victim, swap có kiểm tra lỗi, rồi mới remove khỏi FIFO; bỏ qua frame đang bị DMA ghim.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What are the advantages and disadvantages of using the unified system call interface for manipulating different system components, i.e. read/write/free for files, memory and I/O devices?}
+	    \viet{Thành}{Trả lời Q1: thiết kế OS, hiệu năng, xử lý lỗi, tính di động; liên hệ syscall \texttt{memmap} gom nhiều thao tác.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 7. CO-PROCESSOR DMA — KHÔI (7.1) + THÀNH (7.2)
+	% ===========================================================
+	\section{Co-processor}
+	\subsection{Cơ chế bất đồng bộ và ngắt}
+
+	\noindent\textbf{Luồng xử lý DMA:}
+	\begin{enumerate}
+	    \item CPU tiếp nhận \texttt{dma\_memcpy}, tạo \texttt{dma\_request} rồi gửi vào hàng đợi DMA.
+	    \item Worker \texttt{co\_processor()} lấy yêu cầu, thực hiện \texttt{dpi\_rtl\_dma\_copy()} qua Verilator. CPU có thể tiếp tục chạy tiến trình khác.
+	    \item Worker đưa kết quả vào IRQ queue qua \texttt{dma\_irq\_enqueue()} và gọi \texttt{dma\_notify\_cpu()} để gửi \texttt{SIGUSR1}.
+	    \item \texttt{dma\_signal\_handler()} chỉ đặt cờ \texttt{cpu\_irq\_pending}.
+	    \item \texttt{dma\_handle\_pending\_irqs()} xử lý completion tại CPU thread; \texttt{dma\_completion\_handler()} cập nhật kết quả và bỏ pin frame.
+	\end{enumerate}
+
+	\begin{figure}[H]
+	\centering
+	\begin{tikzpicture}[>=stealth, every node/.style={font=\small}]
+	  \node[draw,rounded corners,align=center,text width=10.7cm] (s1) at (0,0) {CPU gửi yêu cầu DMA vào hàng đợi};
+	  \node[draw,rounded corners,align=center,text width=10.7cm] (s2) at (0,-1.2) {CPU tiếp tục chạy tiến trình khác; DMA worker thực hiện truyền RTL};
+	  \node[draw,rounded corners,align=center,text width=10.7cm] (s3) at (0,-2.4) {DMA hoàn tất: enqueue IRQ và gửi \texttt{SIGUSR1}};
+	  \node[draw,rounded corners,align=center,text width=10.7cm] (s4) at (0,-3.6) {Signal handler đặt cờ; CPU xử lý completion tại safe point};
+	  \node[draw,rounded corners,align=center,text width=10.7cm] (s5) at (0,-4.8) {DMA hết pending: giải phóng PCB nếu đang deferred};
+	  \draw[->] (s1) -- (s2);
+	  \draw[->] (s2) -- (s3);
+	  \draw[->] (s3) -- (s4);
+	  \draw[->] (s4) -- (s5);
+	\end{tikzpicture}
+	\caption{Luồng xử lý DMA bất đồng bộ}
+	\label{fig:khoi-dma-flow}
+	\end{figure}
+
+	\noindent\textbf{Nguyên tắc xử lý tín hiệu SIGUSR1 trong signal handler:}
+	\begin{itemize}
+	    \item \texttt{SIGUSR1} đến bất đồng bộ, nên handler tránh khóa mutex, thay đổi queue hoặc giải phóng bộ nhớ.
+	    \item Completion được xử lý trong vòng lặp CPU qua \texttt{dma\_handle\_pending\_irqs()}, nơi có thể thao tác dữ liệu dùng chung an toàn hơn.
+	    \item Hàng đợi IRQ giữ từng completion; hệ thống không dựa vào số lượng signal để đếm số request đã xong.
+	\end{itemize}
+
+	\noindent\textbf{Deferred PCB cleanup:}
+	\begin{itemize}
+	    \item Tiến trình có thể hoàn tất chương trình khi DMA còn tham chiếu các frame của nó.
+	    \item CPU gọi \texttt{finish\_proc()} để rút tiến trình khỏi scheduler; nếu \texttt{dma\_process\_has\_pending(pid)} còn đúng, PCB được giữ trong danh sách \texttt{struct deferred\_pcb}.
+	    \item Sau khi IRQ đã được xử lý và request không còn pending, \texttt{reap\_deferred\_pcbs()} gọi \texttt{release\_finished\_pcb()} để giải phóng tài nguyên.
+	\end{itemize}
+
+	\noindent\textbf{Bằng chứng 1 -- CPU không bị chặn (\texttt{khoi\_dma\_nonblocking\_test}):}
+	\begin{itemize}
+	    \item DMA submit 512 byte cho PID 1 và bắt đầu chạy RTL ở khoảng slot 5.
+	    \item CPU tiếp tục dispatch PID 2 ở slot 6--12; PID 2 kết thúc tại slot 13.
+	    \item DMA RTL báo completion tại slot 17--18; CPU nhận \texttt{SIGUSR1} và xử lý IRQ ở slot 19.
+	    \item Kết quả: PID 2 đã chạy xong trước DMA completion; test trả mã thoát 0.
+	\end{itemize}
+
+	\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+[DMA] SUBMIT id=1 len=512
+[DMA] START id=1
+[DMA] Deferred PCB cleanup PID=1
+CPU 0: Dispatched process  2
+...
+CPU 0: Processed  2 has finished
+[DMA RTL] done=1 irq_seen=1 callback=1 hw_error=0 bus_error=0
+[CPU SIGNAL] CPU 0 received SIGUSR1
+[CPU IRQ] CPU 0 handling DMA id=1
+[DMA] IRQ HANDLED id=1 status=DONE
+[PGTBL-FREE] PID 1: released 1 RAM frame(s), ...
+	\end{lstlisting}
+
+	\noindent\textbf{Bằng chứng 2 -- Deferred cleanup (\texttt{khoi\_dma\_deferred\_test}):}
+	\begin{itemize}
+	    \item PID 1 kết thúc ở slot 3 khi DMA vẫn pending; xuất hiện \texttt{Deferred PCB cleanup PID=1}.
+	    \item Sau RTL completion và \texttt{IRQ HANDLED id=1 status=DONE} ở khoảng slot 20, log mới ghi nhận \texttt{PGTBL-FREE} của PID 1.
+	    \item Kết quả cho thấy bảng trang không được giải phóng trước DMA completion trong phép thử này; test trả mã thoát 0.
+	\end{itemize}
+
+    
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+[DMA] SUBMIT id=1 len=512
+[DMA] START id=1
+CPU 0: Processed  1 has finished
+[DMA] Deferred PCB cleanup PID=1
+...
+[DMA RTL] done=1 irq_seen=1 callback=1 hw_error=0 bus_error=0
+[CPU SIGNAL] CPU 0 received SIGUSR1
+[CPU IRQ] CPU 0 handling DMA id=1
+[DMA] IRQ HANDLED id=1 status=DONE
+[DMA] TRANSFER_DONE id=1
+[PGTBL-FREE] PID 1: released 1 RAM frame(s),
+0 swap frame(s), 20480B of page tables
+\end{lstlisting}
+  
+
+	\subsection{Bus addressing: DMA truy cập bộ nhớ}
+	\viet{Thành}{\texttt{libmem\_dma\_memcpy}: kéo trang từ SWAP lên rồi ghim, chia đoạn theo trang, submit không chờ; output một lần DMA vắt qua nhiều trang.}
+
+	% ===========================================================
+	% 8. ĐỒNG BỘ HÓA — THÀNH
+	% ===========================================================
+	\section{Synchronization}
+
+	\subsection{Tài nguyên dùng chung và khóa}
+	\viet{Thành}{Bảng: tài nguyên dùng chung (hàng đợi, running\_list, RAM, SWAP, bảng trang, danh sách pin DMA, hàng đợi IRQ) và khóa bảo vệ tương ứng.}
+
+	\subsection{Trả lời câu hỏi}
+	\begin{enumerate}
+	    \item \textbf{What happens if the synchronization is not handled in your Simple OS? Illustrate the problem of your simple OS (assignment outputs) by example if you have any in the added kernel memory operations.}
+	    \viet{Thành}{Trả lời Q7, dùng kịch bản 2 CPU swap đúng frame đang được DMA chép.}
+	\end{enumerate}
+
+	% ===========================================================
+	% 9. KẾT LUẬN — LINH
+	% ===========================================================
+	\section{Kết luận}
+	\viet{Linh}{Những gì nhóm đã làm được, hạn chế, hướng mở rộng.}
+
+	% ===========================================================
+	% TÀI LIỆU THAM KHẢO
+	% ===========================================================
+	\begin{thebibliography}{9}
+
+	\bibitem{osc10}
+	Abraham Silberschatz, Peter Baer Galvin, and Greg Gagne.
+	\newblock \textit{Operating System Concepts}, 10th Edition.
+	\newblock Wiley, 2018.
+
+	\end{thebibliography}
+
+\end{document}
