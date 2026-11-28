@@ -420,8 +420,7 @@ liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
     \noindent\textbf{Luồng xử lý FREE:}
     Khi gọi \texttt{\_\_free(caller, vmaid, rgid)}, hệ thống xác thực, kiểm tra \texttt{cur\_vma != NULL} và \texttt{rgnode->vmaid == vmaid}. Nếu vùng nhớ không có khung trang nào bị DMA ghim, vùng $[\texttt{rg\_start}, \texttt{rg\_end})$ được bọc vào nút \texttt{freerg\_node} (gán đúng \texttt{vmaid}) và chèn vào đầu danh sách \texttt{cur\_vma->vm\_freerg\_list} thông qua \texttt{enlist\_vm\_freerg\_list()}. Cuối cùng, mục \texttt{symrgtbl[rgid]} được đặt về trạng thái trống (\texttt{vmaid = -1}, \texttt{rg\_start = rg\_end = 0}).
     
-    Ngoài ra, theo quy ước khoảng nửa mở $[\texttt{start}, \texttt{end})$, vùng cấm \texttt{\_\_PAGEZERO} ($[\texttt{0x0}, \texttt{0x1000})$) được chặn ngay ở đầu \texttt{pg\_getval()} và \texttt{pg\_setval()} thông qua macro để bổ trợ cho cơ chế chặn ở tầng tra bảng trang của MMU
-    \texttt{PAGING64\_IS\_PAGEZERO\_ADDR(addr)}, 
+    Ngoài ra, theo quy ước khoảng nửa mở $[\texttt{start}, \texttt{end})$, vùng cấm \texttt{\_\_PAGEZERO} ($[\texttt{0x0}, \texttt{0x1000})$) được chặn ngay ở đầu \texttt{pg\_getval()} và \texttt{pg\_setval()} thông qua macro \texttt{PAGING64\_IS\_PAGEZERO\_ADDR(addr)} để bổ trợ cho cơ chế chặn ở tầng tra bảng trang của MMU.
     
     \subsection{Phân vùng theo kích thước}
     
@@ -525,13 +524,13 @@ liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
     
     \subsection{Trả lời câu hỏi}
     \begin{enumerate}
-        \item \textbf{What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
+        \item \textbf{Q4 -- What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
     
         Segmentation tổ chức bộ nhớ theo cấu trúc logic của chương trình và hỗ trợ phân quyền bảo vệ thuận tiện ở mức từng đoạn, nhưng gây \textit{phân mảnh ngoại vi} do mỗi đoạn có kích thước thay đổi và đòi hỏi không gian vật lý liên tục. Ngược lại, phân trang (paging) chia bộ nhớ thành các trang kích thước cố định giúp loại bỏ phân mảnh ngoại vi, nhưng không phản ánh ranh giới logic của dữ liệu. Kết hợp phân đoạn với phân trang giữ được khả năng phân tách logic và bảo vệ theo vùng của phân đoạn, đồng thời chia nhỏ mỗi đoạn thành các trang cố định để ánh xạ rời rạc vào RAM vật lý, khắc phục triệt để phân mảnh ngoại vi.
     
         \textit{Liên hệ trong code:} Lớp phân đoạn được hiện thực bằng danh sách \texttt{vm\_area\_struct} theo mô hình macOS: tách biệt vùng cấm \texttt{\_\_PAGEZERO}, ba vùng heap người dùng (\texttt{vma0} SMALL, \texttt{vma1} MEDIUM, \texttt{vma2} LARGE) và vùng kernel từ \texttt{KERNEL\_BASE\_ADDR}. Bên dưới mỗi VMA, khi \texttt{inc\_vma\_limit()} nới \texttt{sbrk}, hàm \texttt{vm\_map\_ram()} chia đoạn ảo thành các trang $4\text{ KB}$ và ánh xạ qua bảng trang 5 cấp tới các khung trang vật lý bất kỳ từ \texttt{MEMPHY\_get\_freefp()}, vừa giữ được cấu trúc vùng theo kích thước vừa không cần tìm khối RAM vật lý liên tục lớn.
     
-        \item \textbf{What are the advantages and disadvantages of paging and contiguous memory allocation?}
+        \item \textbf{Q6 -- What are the advantages and disadvantages of paging and contiguous memory allocation?}
 
         \begin{itemize}
             \item \textbf{Phân trang (Paging):} \textit{Ưu điểm} là loại bỏ hoàn toàn phân mảnh ngoại vi, hỗ trợ mở rộng không gian địa chỉ động mà không cần di dời tiến trình và dễ triển khai bộ nhớ ảo/swapping từng trang. \textit{Nhược điểm} là phát sinh phân mảnh nội vi ở trang cuối mỗi lần nới, tốn bộ nhớ lưu bảng trang và tốn thêm chu kỳ truy cập bộ nhớ để dịch địa chỉ.
@@ -703,7 +702,7 @@ print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
-	    \item \textbf{What are the benefits of extending hierarchical paging to N level?}
+	    \item \textbf{Q5 -- What are the benefits of extending hierarchical paging to N level?}
 
 	    Phân trang phân cấp là phân trang chính bảng trang (Chương 8): số trang được tách thành nhiều chỉ số, mỗi chỉ số tra trong một bảng nhỏ. Với 32 bit và trang 4 KB, bảng 1 cấp đã cần 4 MB liên tục cho mỗi tiến trình; với 64 bit, Chương 8 chỉ ra 2 cấp vẫn để lại bảng ngoài \(2^{42}\) entry, nên phải thêm cấp. Tăng lên \(N\) cấp có các lợi ích sau.
 	    \begin{itemize}
@@ -739,7 +738,7 @@ if (caller == NULL || caller->mm == NULL) return -1;
 	\subsection{Truy cập bộ nhớ user và kernel}
 	\begin{itemize}[leftmargin=*]
 		\item \textbf{Phía user (\texttt{\_\_read\_user\_mem}, \texttt{\_\_write\_user\_mem}):} Đọc/ghi qua \texttt{user\_rg\_to\_va()} (và bản nội bộ \texttt{\_locked} để tránh tái khóa \texttt{mmvm\_lock}). Hàm kiểm tra \texttt{rgid}, khớp \texttt{rg->vmaid == vmaid}, kiểm tra biên nửa mở $[\texttt{rg\_start}, \texttt{rg\_end})$ và $[\texttt{vm\_start}, \texttt{vm\_end})$, đồng thời chặn tuyệt đối địa chỉ kernel (\texttt{PAGING64\_IS\_\allowbreak KERNEL\_ADDR}) và vùng \texttt{PAGEZERO} ($< \texttt{0x1000}$), trả \texttt{-1} nếu vi phạm.
-		\item \textbf{Phía kernel (\texttt{\_\_read\_kernel\_mem}, \texttt{\_\_write\_kernel\_mem}):} Thao tác trên \texttt{caller->krnl->mm}, kiểm tra \texttt{kernel\_va\_to\_pa()} bảo đảm địa chỉ thuộc dải kernel ($\ge \texttt{KERNEL\_BASE\_ADDR}$) rồi đọc/ghi vật lý qua \texttt{SYSCALL 17} (\texttt{SYSMEM\_IO\_READ} / \texttt{SYSMEM\_IO\_WRITE}).
+		\item \textbf{Phía kernel (\texttt{\_\_read\_kernel\_mem}, \texttt{\_\_write\_kernel\_mem}):} Thao tác trên \texttt{caller->krnl->mm} (bảng trang kernel dùng chung) kết hợp bảng vùng nhớ kernel tách theo từng PID (\texttt{krnl\_symtbl\_head} / \texttt{get\_krnl\_symrg\_byid()}, bảo vệ bởi \texttt{kmm\_lock}) và cặp bản nội bộ \texttt{\_locked} (\texttt{\_\_read\_kernel\_mem\_locked} / \texttt{\_\_write\_kernel\_mem\_locked}), kiểm tra \texttt{kernel\_va\_to\_pa()} bảo đảm địa chỉ thuộc dải kernel ($\ge \texttt{KERNEL\_BASE\_ADDR}$) rồi đọc/ghi vật lý qua \texttt{SYSCALL 17} (\texttt{SYSMEM\_IO\_READ} / \texttt{SYSMEM\_IO\_WRITE}).
 		\item \textbf{Trao đổi qua ranh giới (\texttt{libkmem\_copy\_from\_user}, \texttt{libkmem\_copy\_to\_user}):} Giữ thứ tự khóa cố định \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, kiểm tra chống tràn số và lấy \texttt{vmaid} động từ \texttt{src\_rg->vmaid} / \texttt{dst\_rg->vmaid} (tương thích 3 vùng Small/Medium/Large), rồi sao chép từng byte qua các hàm đọc/ghi hai không gian.
 	\end{itemize}
 
@@ -767,7 +766,7 @@ $ OSSIM_KERNEL_COPY_TEST=1 ./os khoi_kernel_copy_test
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
-	    \item \textbf{What are the advantages and disadvantages of using the unified system call interface for manipulating different system components, i.e. read/write/free for files, memory and I/O devices?}
+	    \item \textbf{Q1 -- What are the advantages and disadvantages of using the unified system call interface for manipulating different system components, i.e. read/write/free for files, memory and I/O devices?}
 
 	    \begin{itemize}[leftmargin=*]
 	        \item \textbf{Thiết kế OS:} \textit{Ưu:} Thu gọn bảng system call, thống nhất điểm kiểm tra tham số, phân quyền và quản lý tài nguyên (tương tự mô hình \textit{everything is a file}). \textit{Nhược:} Cần thêm tầng giải mã (dispatcher) và có thể làm interface kém rõ ràng về ngữ nghĩa riêng của từng thiết bị.
@@ -918,7 +917,7 @@ CPU 0: Processed  1 has finished
 	\hline
 	User \texttt{symrgtbl}, \texttt{vm\_freerg\_list}, \texttt{fifo\_pgn} & \texttt{mmvm\_lock} & \texttt{src/libmem.c} & Tuần tự hóa \texttt{alloc/free}, đọc/ghi user và swap trang. \\
 	\hline
-	Kernel \texttt{krnl->mm}, \texttt{symrgtbl}, \texttt{sbrk} & \texttt{kmm\_lock} & \texttt{src/libmem.c} & Bảo vệ cấp phát (\texttt{\_\_kmalloc}) và truy cập vùng nhớ kernel. \\
+	Kernel \texttt{krnl->mm}, \texttt{krnl\_symtbl\_head} (theo PID), \texttt{sbrk} & \texttt{kmm\_lock} & \texttt{src/libmem.c} & Bảo vệ cấp phát (\texttt{\_\_kmalloc}) và truy cập vùng nhớ kernel. \\
 	\hline
 	Cây bảng trang 5 cấp, \texttt{pgstat}, \texttt{free\_fp\_list} & \texttt{pgtbl\_lock} & \texttt{src/mm64.c} & Bảo vệ dịch/cập nhật PTE và cấp phát khung RAM vật lý. \\
 	\hline
@@ -933,11 +932,11 @@ CPU 0: Processed  1 has finished
 	\label{tab:sync_locks}
 	\end{table}
 
-	Để tránh deadlock khi thao tác chéo giữa không gian user và kernel (\texttt{libkmem\_copy\_from\_user}, \texttt{libkmem\_copy\_to\_user}, \texttt{libmem\_dma\_memcpy}), hệ thống luôn áp dụng thứ tự khóa cố định \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, đồng thời tách cặp hàm nội bộ \texttt{\_\_read\_user\_mem\_locked} / \texttt{\_\_write\_user\_mem\_locked} để tránh tự khóa chồng lên chính mình.
+	Để tránh deadlock khi thao tác chéo giữa không gian user và kernel (\texttt{libkmem\_copy\_from\_user}, \texttt{libkmem\_copy\_to\_user}, \texttt{libmem\_dma\_memcpy}), hệ thống luôn áp dụng thứ tự khóa cố định \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, đồng thời tách các cặp hàm nội bộ \texttt{\_\_read\_user\_mem\_locked} / \texttt{\_\_write\_user\_mem\_locked} và \texttt{\_\_read\_kernel\_mem\_locked} / \texttt{\_\_write\_kernel\_mem\_locked} để tránh tự khóa chồng lên chính mình.
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
-	    \item \textbf{What happens if the synchronization is not handled in your Simple OS? Illustrate the problem of your simple OS (assignment outputs) by example if you have any in the added kernel memory operations.}
+	    \item \textbf{Q7 -- What happens if the synchronization is not handled in your Simple OS? Illustrate the problem of your simple OS (assignment outputs) by example if you have any in the added kernel memory operations.}
 
 	    Nếu thiếu đồng bộ hóa giữa các CPU và \texttt{co\_processor}, nhiều luồng sẽ sửa đổi đồng thời bảng trang, danh sách vùng trống và hàng đợi dùng chung, dẫn đến hỏng cấu trúc dữ liệu, cấp trùng khung RAM, sai lệch dữ liệu DMA hoặc deadlock toàn hệ thống.
 
