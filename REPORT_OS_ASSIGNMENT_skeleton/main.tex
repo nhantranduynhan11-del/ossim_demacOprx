@@ -153,7 +153,7 @@ make os
 	\hline
 	Hoàng Phạm Tiến Thành & 2413148 & Swapping, bộ nhớ kernel, giao tiếp user/kernel và cầu nối DMA đa trang. \\
 	\hline
-	Trần Duy Nhân & 2412439 & \textcolor{gray}{\textit{[Nhân] Điền phần code và phần báo cáo phụ trách}} \\
+	Trần Duy Nhân & 2412439 & Phân trang 5 cấp và bố cục bộ nhớ kiểu macOS (\texttt{src/mm64.c}, \texttt{include/mm64.h}): duyệt bảng trang, cấp bảng theo nhu cầu, thống kê bảng trang, PAGEZERO và ba vùng SMALL/MEDIUM/LARGE, cấp frame liên tục cho bộ nhớ kernel. Báo cáo mục 3, mục 5 và Q5. \\
 	\hline
 	Đặng Bá Khôi & 2411679 & Scheduling, xử lý ngắt và DMA bất đồng bộ. \\
 	\hline
@@ -284,22 +284,111 @@ make os
 	\section{Memory Layout}
 
 	\subsection{Bố cục vùng nhớ}
-	\viet{Nhân}{Bảng layout theo kiểu macOS: PAGEZERO, vùng Small, Medium, Large, vùng kernel (\texttt{KERNEL\_BASE\_ADDR}). Mỗi dòng ghi địa chỉ bắt đầu, kết thúc, kích thước, căn chỉnh, mô tả.}
+	Địa chỉ ảo dài 64 bit nhưng chỉ dùng 57 bit thấp, khớp với 5 cấp phân trang ở Bảng 2 của đề. Theo quy tắc canonical address (trang 15 của đề), bit 63..57 phải chép lại bit 56, nên không gian địa chỉ chia thành hai nửa:
+	\begin{itemize}
+	    \item Nửa user, từ \texttt{0x0000000000000000} đến \texttt{0x00FFFFFFFFFFFFFF} (chỉ số PGD 0--255), riêng cho từng tiến trình.
+	    \item Nửa kernel, từ \texttt{KERNEL\_BASE\_ADDR = 0xFF00000000000000} (chỉ số PGD 256--511), giống nhau với mọi tiến trình.
+	\end{itemize}
+	Các địa chỉ nằm giữa hai nửa là non-canonical: \texttt{pgtbl\_walk()} trả về \texttt{NULL} và tính là một lần lỗi trang.
+
+	Trong nửa user, \texttt{init\_mm()} (\texttt{src/mm64.c}) tạo ba VMA nối nhau \texttt{vma0} $\rightarrow$ \texttt{vma1} $\rightarrow$ \texttt{vma2}. Mỗi VMA có \texttt{sbrk} và danh sách vùng trống riêng, \texttt{sbrk} bắt đầu tại \texttt{vm\_start} và chỉ tăng trong vùng của mình. Kernel chỉ có một VMA, tạo bằng \texttt{init\_mm(os.mm, NULL)}. Mọi khoảng địa chỉ trong bảng~\ref{tab:memory_layout} là nửa mở \([start, end)\).
+
 	\begin{table}[H]
-	\centering\small
-	\begin{tabularx}{\linewidth}{|l|l|l|l|X|}
+	\centering\footnotesize
+	\begin{tabularx}{\linewidth}{|l|l|l|l|l|X|}
 	\hline
-	\textbf{Vùng} & \textbf{Bắt đầu} & \textbf{Kết thúc} & \textbf{Kích thước} & \textbf{Mô tả} \\
+	\textbf{Vùng} & \textbf{Bắt đầu} & \textbf{Kết thúc} & \textbf{Kích thước} & \textbf{Căn chỉnh} & \textbf{Mô tả} \\
 	\hline
-	 & & & & \\
+	PAGEZERO & \texttt{0x0000000} & \texttt{0x0001000} & 4 KB & -- & Không bao giờ được map. Mọi truy cập vào đây là lỗi. \\
+	\hline
+	Dự phòng & \texttt{0x0001000} & \texttt{0x0010000} & 60 KB & -- & Chỗ của \texttt{\_\_TEXT} và \texttt{\_\_LINKEDIT}. Simulator không nạp code vào RAM nên vùng này để trống. \\
+	\hline
+	SMALL (\texttt{vma0}) & \texttt{0x0010000} & \texttt{0x0100000} & 960 KB & 16 B & Khối có kích thước $\le$ 512 B. \\
+	\hline
+	MEDIUM (\texttt{vma1}) & \texttt{0x0100000} & \texttt{0x0500000} & 4 MB & 256 B & Khối từ 513 B đến 4096 B. \\
+	\hline
+	LARGE (\texttt{vma2}) & \texttt{0x0500000} & \texttt{0x1000000} & 11 MB & 4096 B & Khối lớn hơn 4096 B, luôn bắt đầu ở biên trang. \\
+	\hline
+	Kernel & \texttt{0xFF00000000000000} & tăng theo \texttt{kmalloc} & -- & 4096 B & VMA của \texttt{krnl->mm}, dùng chung cho mọi tiến trình qua \texttt{krnl\_pgd}. Frame được cấp liên tục vật lý. \\
 	\hline
 	\end{tabularx}
 	\caption{Bố cục bộ nhớ ảo của một tiến trình}
 	\label{tab:memory_layout}
 	\end{table}
 
+	\begin{figure}[H]
+	\centering
+	\begin{tikzpicture}[font=\footnotesize]
+	    \def\w{4.6}
+	    \draw[fill=gray!40] (0,0) rectangle (\w,0.6) node[pos=0.5] {PAGEZERO (không map)};
+	    \draw[fill=gray!12] (0,0.6) rectangle (\w,1.2) node[pos=0.5] {dự phòng (\_\_TEXT)};
+	    \draw[fill=blue!12] (0,1.2) rectangle (\w,2.1) node[pos=0.5] {SMALL (\texttt{vma0})};
+	    \draw[fill=green!12] (0,2.1) rectangle (\w,3.2) node[pos=0.5] {MEDIUM (\texttt{vma1})};
+	    \draw[fill=orange!15] (0,3.2) rectangle (\w,4.6) node[pos=0.5] {LARGE (\texttt{vma2})};
+	    \draw[dashed] (0,4.6) rectangle (\w,5.4) node[pos=0.5] {chưa dùng};
+	    \draw[fill=gray!25,dashed] (0,5.6) rectangle (\w,6.4) node[pos=0.5] {lỗ non-canonical};
+	    \draw[fill=red!12] (0,6.6) rectangle (\w,7.6) node[pos=0.5] {kernel (chung)};
+	    \node[left] at (0,0) {\texttt{0x0}};
+	    \node[left] at (0,0.6) {\texttt{0x1000}};
+	    \node[left] at (0,1.2) {\texttt{0x10000}};
+	    \node[left] at (0,2.1) {\texttt{0x100000}};
+	    \node[left] at (0,3.2) {\texttt{0x500000}};
+	    \node[left] at (0,4.6) {\texttt{0x1000000}};
+	    \node[left] at (0,5.4) {\texttt{0x00FFFFFFFFFFFFFF}};
+	    \node[left] at (0,6.6) {\texttt{0xFF00000000000000}};
+	    \node[right] at (\w,0.3) {truy cập bị coi là lỗi};
+	    \node[right] at (\w,1.65) {$\le$ 512 B, căn 16 B};
+	    \node[right] at (\w,2.65) {513--4096 B, căn 256 B};
+	    \node[right] at (\w,3.9) {$>$ 4096 B, căn theo trang};
+	    \node[right] at (\w,7.1) {chỉ số PGD 256--511};
+	\end{tikzpicture}
+	\caption{Bố cục không gian địa chỉ (không theo tỉ lệ)}
+	\label{fig:nhan-layout}
+	\end{figure}
+
+	Các hằng số nằm trong \texttt{include/mm64.h}. \texttt{liballoc()} gọi \texttt{mm64\_vmaid\_for\_size()} để chọn vùng và \texttt{mm64\_align\_size()} để làm tròn kích thước theo quantum của vùng đó:
+	\begin{lstlisting}[language=C,basicstyle=\ttfamily\scriptsize]
+#define PAGING64_PAGEZERO_END   0x0000000000001000ULL
+#define PAGING64_SMALL_START    0x0000000000010000ULL  /* align 16   */
+#define PAGING64_MEDIUM_START   0x0000000000100000ULL  /* align 256  */
+#define PAGING64_LARGE_START    0x0000000000500000ULL  /* align 4096 */
+#define PAGING64_LARGE_END      0x0000000001000000ULL
+#define PAGING64_SMALL_MAX_SZ   512    /* size <= 512  -> SMALL  */
+#define PAGING64_MEDIUM_MAX_SZ  4096   /* size <= 4096 -> MEDIUM */
+#define KERNEL_BASE_ADDR        0xFF00000000000000ULL
+	\end{lstlisting}
+
+	Sau mỗi lệnh \texttt{alloc}, \texttt{free}, \texttt{read}, \texttt{write}, \texttt{print\_pgtbl()} in thêm một dòng \texttt{[LAYOUT]} cho từng vùng (khi bật \texttt{IODUMP}). Đoạn dưới là output của tiến trình \texttt{p0s} trong \texttt{os\_0\_mlq\_paging}, ngay sau lệnh \texttt{alloc 300 4}:
+	\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
+[LAYOUT] PID 1 PAGEZERO [0x00000000,0x00001000) never mapped, no access
+[LAYOUT] PID 1 vma0 SMALL  [0x00010000,0x00100000) align=16   sbrk=0x00011000 used=4096/983040B pages=1 swapped=0 free=3488B
+[LAYOUT] PID 1 vma1 MEDIUM [0x00100000,0x00500000) align=256  sbrk=0x00100000 used=0/4194304B pages=0 swapped=0 free=0B
+[LAYOUT] PID 1 vma2 LARGE  [0x00500000,0x01000000) align=4096 sbrk=0x00500000 used=0/11534336B pages=0 swapped=0 free=0B
+	\end{lstlisting}
+	Hai lệnh \texttt{alloc 300} được làm tròn lên 304 B (bội của 16) và cùng nằm trong SMALL, tại \texttt{0x10000} và \texttt{0x10130}. Lần \texttt{alloc} đầu đã nới \texttt{sbrk} thêm một trang (\texttt{used=4096}), lần thứ hai lấy luôn chỗ trống còn lại của trang đó, nên trong danh sách vùng trống còn \(4096 - 2 \times 304 = 3488\) B.
+
 	\subsection{Lý do thiết kế}
-	\viet{Nhân}{Vì sao chia 3 vùng theo kích thước (tham khảo bảng macOS trang 31 của đề), vì sao chọn ngưỡng 512 B / 4096 B và căn chỉnh 16 B / 256 B / 4096 B, lợi ích cho DMA. So sánh ngắn với layout Linux của học kỳ trước.}
+	\noindent\textbf{Dựa trên bảng macOS ở trang 31 của đề.} Trong bảng này, tiến trình mở đầu bằng \texttt{PAGEZERO} dài 4 KB tại địa chỉ 0, \texttt{\_\_TEXT} bắt đầu từ \texttt{0x1000}, còn heap nằm trong các vùng \texttt{MALLOC} riêng. Bộ cấp phát của macOS cũng chia heap thành các zone theo cỡ khối: khối nhỏ cấp theo quantum 16 B, khối lớn cấp nguyên trang. Nhóm giữ cách chia đó và thu nhỏ các ngưỡng cho vừa heap 16 MB của simulator.
+
+	\medskip
+	\noindent\textbf{PAGEZERO.} Trang đầu tiên không bao giờ được map, nên đọc ghi qua con trỏ \texttt{NULL}, hoặc \texttt{NULL} cộng một offset nhỏ, đều bị chặn ngay ở bước dịch địa chỉ: \texttt{pgtbl\_find\_pte()} trả \texttt{NULL} và tăng \texttt{nr\_fault} cho mọi địa chỉ user nhỏ hơn \texttt{0x1000}. \texttt{mm64\_dma\_pin\_user\_page()} cũng từ chối các địa chỉ này nên DMA không ghi được vào PAGEZERO. Ở bản tích hợp ngày 22/11, biến đầu tiên của mọi tiến trình nằm tại \texttt{0x0}; với layout mới, lệnh \texttt{alloc 300 0} của \texttt{p0s} nằm tại \texttt{0x10000}.
+
+	\medskip
+	\noindent\textbf{Chia heap thành ba vùng theo kích thước.} Mỗi vùng chỉ chứa các khối cùng cỡ. Khi một khối được giải phóng, lỗ trống để lại có kích thước gần với các yêu cầu sau trong cùng vùng nên dễ được dùng lại, và khối nhỏ không chen vào giữa chỗ dành cho khối lớn. Nhờ vậy heap ít bị phân mảnh ngoài, vấn đề mà Chương 8 mô tả cho cấp phát liên tục. Phân mảnh trong bị chặn bởi quantum của từng vùng: tối đa 15 B ở SMALL, 255 B ở MEDIUM và 4095 B ở LARGE. Khi cấp phát, \texttt{get\_free\_vmrg\_area()} chỉ duyệt danh sách vùng trống của đúng một vùng.
+
+	\medskip
+	\noindent\textbf{Ngưỡng 512 B và 4096 B.} 4096 B là kích thước trang. Khối lớn hơn một trang luôn chiếm nhiều trang, nên nhóm đưa nó vào LARGE và căn theo trang: một buffer \(N\) trang dùng đúng \(N\) frame và không chung trang với biến khác. Ngưỡng 512 B (1/8 trang) tách các biến nhỏ khỏi khối cỡ vừa; mọi lệnh \texttt{alloc} trong \texttt{input/proc} đều xin 100 hoặc 300 B nên đều rơi vào SMALL. Quantum 256 B của MEDIUM giữ phần hao phí mỗi khối dưới 256 B. Đề không quy định các con số này; đây là ngưỡng nhóm thống nhất khi chia việc.
+
+	\medskip
+	\noindent\textbf{Phối hợp với DMA.} Chip DMA RTL yêu cầu địa chỉ và độ dài chia hết cho 4, và \texttt{libmem\_dma\_memcpy()} kiểm tra điều kiện này trước khi gửi yêu cầu. Mọi vùng đều căn từ 16 B trở lên nên địa chỉ bắt đầu của bất kỳ khối nào cũng thỏa. Khối LARGE bắt đầu ở biên trang, nên nếu buffer đích cũng căn theo trang thì một lần chép 8192 B chỉ cần 2 đoạn, mỗi đoạn trọn một trang. Khối SMALL và MEDIUM có thể vắt qua biên trang; khi đó \texttt{libmem\_dma\_memcpy()} tách yêu cầu theo trang (mục 7.2). Ở phía kernel, \texttt{vm\_map\_ram()} cấp các frame liên tục vật lý cho mọi địa chỉ kernel bằng \texttt{alloc\_contig\_pages\_range()}. Đề yêu cầu \texttt{KMALLOC} trả về vùng nhớ liên tục vật lý, và Chương 9 cũng giải thích lý do: thiết bị như DMA truy cập RAM trực tiếp nên cần một khối liền nhau, bộ nhớ kernel vì thế được cấp bằng buddy system hoặc slab.
+	% Câu về alloc_contig_pages_range() dựa trên nhánh nhan/kmalloc-contig-zerofill; bỏ nếu nhánh này chưa merge vào main.
+
+	\medskip
+	\noindent\textbf{Ít tốn bảng trang.} Cả ba vùng nằm trong 16 MB đầu nên dùng chung PGD[0], P4D[0], PUD[0] và một bảng PMD. SMALL và MEDIUM cùng nằm trong vùng 2 MB đầu tiên nên dùng chung một bảng PT; LARGE bắt đầu ở vùng 2 MB thứ ba nên cần thêm một PT. Một tiến trình dùng cả ba vùng chỉ tốn 6 bảng, tức 24 KB (test T6 của \texttt{mm64test}).
+
+	\medskip
+	\noindent\textbf{So với layout Linux của học kỳ trước.} Code khung và bản tích hợp trước ngày 26/11 chỉ có một VMA heap bắt đầu từ địa chỉ 0, mọi cỡ khối cùng nới một \texttt{sbrk}. Địa chỉ 0 hợp lệ nên lỗi con trỏ \texttt{NULL} không bị phát hiện, còn khối nhỏ và khối lớn nằm xen nhau trong cùng một danh sách vùng trống. Layout mới giữ PAGEZERO, tách heap thành ba vùng và đặt kernel ở nửa trên của không gian địa chỉ.
 
 	% ===========================================================
 	% 4. QUẢN LÝ BỘ NHỚ ẢO — LINH
@@ -330,18 +419,171 @@ make os
 	\section{Multi-level Paging}
 
 	\subsection{Sơ đồ phân giải địa chỉ}
-	\viet{Nhân}{Cấu trúc địa chỉ 5 cấp (PGD, P4D, PUD, PMD, PT, offset) và một ví dụ tách một địa chỉ thật của nhóm thành 5 chỉ số; hàm \texttt{get\_pd\_from\_address()}, \texttt{pte\_get\_entry()}.}
+	Bảng 2 của đề chia 57 bit thấp của địa chỉ thành 5 chỉ số 9 bit và 12 bit offset (\(5 \times 9 + 12 = 57\)). Mỗi entry dài 8 byte nên một bảng 512 entry chiếm đúng 4096 byte, bằng một trang; đó là lý do mỗi cấp dùng 9 bit.
+
+	\begin{table}[H]
+	\centering\small
+	\begin{tabular}{llllrr}
+	\toprule
+	\textbf{Cấp} & \textbf{Bảng} & \textbf{Bit} & \textbf{Số entry} & \textbf{Một entry phủ} & \textbf{Một bảng phủ} \\
+	\midrule
+	L5 & PGD & 56--48 & 512 & 256 TiB & 128 PiB \\
+	L4 & P4D & 47--39 & 512 & 512 GiB & 256 TiB \\
+	L3 & PUD & 38--30 & 512 & 1 GiB & 512 GiB \\
+	L2 & PMD & 29--21 & 512 & 2 MiB & 1 GiB \\
+	L1 & PT & 20--12 & 512 & 4 KiB & 2 MiB \\
+	-- & offset & 11--0 & -- & 1 B & 4 KiB \\
+	\bottomrule
+	\end{tabular}
+	\caption{Các cấp bảng trang trong \texttt{include/mm64.h}}
+	\label{tab:nhan-levels}
+	\end{table}
+
+	\begin{figure}[H]
+	\centering
+	\begin{tikzpicture}[font=\footnotesize]
+	    \foreach \x/\lab/\bits/\col in {0/dấu/63..57/gray!20, 2.1/PGD/56..48/red!15, 4.2/P4D/47..39/orange!20, 6.3/PUD/38..30/yellow!25, 8.4/PMD/29..21/green!15, 10.5/PT/20..12/blue!15, 12.6/offset/11..0/gray!10} {
+	        \draw[fill=\col] (\x,0) rectangle ++(2.1,0.7);
+	        \node at (\x+1.05,0.35) {\lab};
+	        \node[above] at (\x+1.05,0.7) {\bits};
+	    }
+	    \node[draw,fill=gray!10,align=center,minimum height=0.9cm] (r) at (1.05,-1.8) {\texttt{mm->pgd}\\\texttt{krnl\_pgd}};
+	    \foreach \x/\n/\lab in {3.15/t5/bảng PGD, 5.25/t4/bảng P4D, 7.35/t3/bảng PUD, 9.45/t2/bảng PMD, 11.55/t1/bảng PT} {
+	        \node[draw,fill=white,minimum width=1.7cm,minimum height=0.9cm] (\n) at (\x,-1.8) {\lab};
+	        \draw[->,dashed] (\x,0) -- (\n.north);
+	    }
+	    \node[draw,fill=gray!10,minimum width=1.7cm,minimum height=0.9cm] (f) at (13.65,-1.8) {frame};
+	    \draw[->,dashed] (13.65,0) -- (f.north);
+	    \draw[->] (r) -- (t5);
+	    \draw[->] (t5) -- (t4);
+	    \draw[->] (t4) -- (t3);
+	    \draw[->] (t3) -- (t2);
+	    \draw[->] (t2) -- (t1);
+	    \draw[->] (t1) -- node[above] {FPN} (f);
+	\end{tikzpicture}
+	\caption{Mỗi chỉ số chọn một entry trong bảng tương ứng; entry của bảng PT cho FPN, offset chọn byte trong frame}
+	\label{fig:nhan-walk}
+	\end{figure}
+
+	Đường dịch một địa chỉ ảo trong \texttt{src/mm64.c}:
+	\begin{enumerate}
+	    \item \texttt{pgtbl\_root()} chọn gốc. Địa chỉ từ \texttt{KERNEL\_BASE\_ADDR} trở lên đi qua cây kernel \texttt{krnl->krnl\_pgd}, dùng chung cho mọi tiến trình; các địa chỉ còn lại đi qua \texttt{mm->pgd} của tiến trình gọi.
+	    \item \texttt{get\_pd\_from\_address()} tách 5 chỉ số bằng mask rồi dịch phải 48, 39, 30, 21 và 12 bit.
+	    \item \texttt{pgtbl\_walk()} đọc lần lượt entry ở PGD, P4D, PUD và PMD. Entry khác 0 chứa địa chỉ bảng cấp dưới, entry bằng 0 nghĩa là bảng đó chưa có. Đường map trang (\texttt{vm\_map\_ram()}, \texttt{pte\_set\_fpn()}) gọi với \texttt{alloc = 1} để tạo bảng còn thiếu; đường tra cứu (\texttt{pte\_get\_entry()}) gọi với \texttt{alloc = 0} và không bao giờ tạo bảng.
+	    \item Entry ở bảng PT là PTE theo định dạng của đề: bit 31 là PRESENT, bit 30 là SWAPPED, bit 12..0 là FPN. Nếu trang có mặt, địa chỉ vật lý là \((\mathrm{FPN} \ll 12) \mid \mathrm{offset}\). Nếu trang đang ở SWAP, \texttt{pg\_getpage()} nạp nó về trước.
+	\end{enumerate}
+
+	Bảng~\ref{tab:nhan-split} tách ba địa chỉ. Dòng đầu là ví dụ ở trang 17 của đề; test T1 của \texttt{mm64test} cho đúng các chỉ số này. Hai dòng sau là địa chỉ thật trong các lần chạy của nhóm.
+	\begin{table}[H]
+	\centering\footnotesize
+	\begin{tabularx}{\linewidth}{|l|c|c|c|c|c|c|X|}
+	\hline
+	\textbf{Địa chỉ ảo} & \textbf{PGD} & \textbf{P4D} & \textbf{PUD} & \textbf{PMD} & \textbf{PT} & \textbf{Offset} & \textbf{Ghi chú} \\
+	\hline
+	\texttt{0x39ffe1d9c9000} & \texttt{0x003} & \texttt{0x13f} & \texttt{0x1f8} & \texttt{0x0ec} & \texttt{0x1c9} & \texttt{0x000} & Ví dụ của đề \\
+	\hline
+	\texttt{0x10130} & \texttt{0x000} & \texttt{0x000} & \texttt{0x000} & \texttt{0x000} & \texttt{0x010} & \texttt{0x130} & Biến \texttt{reg 4} của \texttt{p0s} trong \texttt{os\_0\_mlq\_paging} \\
+	\hline
+	\texttt{0xff00000000001000} & \texttt{0x100} & \texttt{0x000} & \texttt{0x000} & \texttt{0x000} & \texttt{0x001} & \texttt{0x000} & Vùng \texttt{kmalloc 200 4} của \texttt{m2s} trong \texttt{os\_2\_mlq\_paging}, tra qua cây kernel \\
+	\hline
+	\end{tabularx}
+	\caption{Tách địa chỉ ảo thành 5 chỉ số}
+	\label{tab:nhan-split}
+	\end{table}
+
+	Với địa chỉ \texttt{0x10130}, \texttt{print\_pgtbl()} in ra (\texttt{os\_0\_mlq\_paging}, sau lệnh \texttt{alloc 300 4} của \texttt{p0s}):
+	\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
+ PDG=00000255a00e77c0 P4D=00000255a003c3e0 PUD=00000255a003d3f0 PMD=00000255a003e400 PT=00000255a003f410
+  va=0x0000000000010000 pgn=0x10 [PGD 000|P4D 000|PUD 000|PMD 000|PT 010] SMALL  -> fpn 0 (pa=0x0)
+ [PGTBL-STAT] PID 1: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=1 pt-mem-access=5 (5.00/walk) pwc-hit=0 faults=0
+	\end{lstlisting}
+	Dòng \texttt{PDG=...PT=} là địa chỉ 5 bảng trên đường duyệt. Trang \texttt{0x10} nằm ở frame 0, nên biến tại \texttt{0x10130} có địa chỉ vật lý \(0 \ll 12 \mid \texttt{0x130} = \texttt{0x130}\).
 
 	\subsection{Thống kê truy cập bộ nhớ và kích thước bảng trang}
-	\viet{Nhân}{Số liệu từ \texttt{print\_pgtbl\_stat} trên bản code cuối: số lần truy cập bộ nhớ cho một lần dịch địa chỉ, số bảng đã cấp phát, tổng dung lượng bảng trang.}
+	Mỗi \texttt{mm\_struct} có bộ đếm \texttt{pgstat} (\texttt{include/os-mm.h}). \texttt{print\_pgtbl\_stat()} in một dòng sau mỗi lần dump bảng trang và khi tiến trình kết thúc (\texttt{free\_pcb\_pgtbl()}):
+	\begin{itemize}
+	    \item \texttt{tables}: số bảng đã cấp ở từng cấp; \texttt{size} bằng tổng số bảng nhân 4096 B.
+	    \item \texttt{walks}: số lần dịch địa chỉ; \texttt{pt-mem-access}: số entry bảng trang đã đọc.
+	    \item \texttt{pwc-hit}: số lần trúng page-walk cache; \texttt{faults}: số lần gặp trang chưa map, PAGEZERO hoặc địa chỉ non-canonical.
+	\end{itemize}
+
+	\noindent\textbf{Số lần truy cập bộ nhớ.} Duyệt đủ 5 cấp tốn 5 lần đọc bảng (PGD, P4D, PUD, PMD, PT), cộng 1 lần đọc dữ liệu. Để giảm con số này, \texttt{pgtbl\_walk()} giữ bảng PT của lần duyệt gần nhất trong \texttt{mm->pt} và gắn nhãn \(\mathrm{VA} \gg 21\) (một vùng 2 MB). Lần dịch tiếp theo trong cùng vùng 2 MB chỉ đọc 1 entry. Cách làm này giống paging-structure cache của CPU Intel; khác TLB ở chỗ vẫn phải đọc PTE. Bảng~\ref{tab:nhan-access} lấy từ dòng \texttt{[PGTBL-STAT]} khi các tiến trình kết thúc:
+	\begin{table}[H]
+	\centering\small
+	\begin{tabular}{lrrrrr}
+	\toprule
+	\textbf{Tiến trình (input)} & \textbf{Lần dịch} & \textbf{Đọc bảng} & \textbf{TB/lần} & \textbf{Trúng cache} & \textbf{Nếu không cache} \\
+	\midrule
+	\texttt{p0s} (\texttt{os\_0\_mlq\_paging}) & 7 & 11 & 1,57 & 6 & 35 \\
+	\texttt{m0s} (\texttt{os\_1\_mlq\_paging}) & 4 & 8 & 2,00 & 3 & 20 \\
+	\texttt{m2s} (\texttt{os\_2\_mlq\_paging}, PID 1) & 5 & 9 & 1,80 & 4 & 25 \\
+	\texttt{khoi\_dma\_data\_test} & 11 & 15 & 1,36 & 10 & 55 \\
+	\texttt{khoi\_kernel\_copy\_test} & 29 & 33 & 1,14 & 28 & 145 \\
+	\bottomrule
+	\end{tabular}
+	\caption{Số lần đọc bảng trang khi chạy các input của nhóm}
+	\label{tab:nhan-access}
+	\end{table}
+	Các biến của một tiến trình trong test đều nằm trong một vài trang SMALL đầu tiên, nên sau lần duyệt đầu, hầu hết các lần dịch đều trúng cache. Test T14 của \texttt{mm64test} cho trường hợp xấu nhất: 100 lần dịch xen kẽ hai vùng xa nhau tốn đủ 500 lần đọc bảng, còn 100 lần dịch trong cùng vùng 2 MB (kể cả xen kẽ SMALL và MEDIUM) chỉ tốn 104 lần.
+
+	Gọi \(t\) là thời gian một lần truy cập RAM và \(a\) là số lần đọc bảng trung bình cho một lần dịch. Một lần đọc dữ liệu tốn \((a+1)\,t\), cùng dạng công thức \(T_{\text{TLB}} + (k+1)\,T_M\) cho bảng trang \(k\) mức ở Chương 8. Không có cache thì \(a = 5\), tức \(6t\). Với \(t = 100\) ns, một lần đọc tốn 600 ns; ở \texttt{khoi\_kernel\_copy\_test} với \(a = 1{,}14\), con số này còn khoảng 214 ns.
+
+	\medskip
+	\noindent\textbf{Dung lượng bảng trang.} Bảng trang chỉ được tạo khi có trang cần map (mục 5.3), nên dung lượng phụ thuộc vào vùng tiến trình thật sự dùng:
+	\begin{table}[H]
+	\centering\small
+	\begin{tabularx}{\linewidth}{Xrr}
+	\toprule
+	\textbf{Trường hợp} & \textbf{Số bảng} & \textbf{Dung lượng} \\
+	\midrule
+	Tiến trình chỉ có lệnh \texttt{calc} (\texttt{p1s}, \texttt{s0}--\texttt{s4}): chỉ có PGD & 1 & 4 KB \\
+	Tiến trình có \texttt{alloc} trong SMALL (\texttt{p0s}, \texttt{m0s}, \texttt{m1s}, \texttt{m2s}) & 5 & 20 KB \\
+	Dùng cả SMALL, MEDIUM và LARGE (test T6) & 6 & 24 KB \\
+	Thêm một trang ở \texttt{0x39ffe1d9c9000} (test T8) & thêm 4 & thêm 16 KB \\
+	Cây kernel, dùng chung cho mọi tiến trình & 5 & 20 KB \\
+	\midrule
+	Bảng 1 cấp, bus 22 bit, trang 256 B (Bảng 1 của đề) & 1 & 64 KB \\
+	Bảng 1 cấp cho 57 bit, trang 4 KB: \(2^{45}\) entry \(\times\) 8 B & 1 & 256 TiB \\
+	\bottomrule
+	\end{tabularx}
+	\caption{Dung lượng bảng trang: số đo của nhóm và các phương án 1 cấp}
+	\label{tab:nhan-size}
+	\end{table}
+	Một tiến trình có cấp phát chỉ tốn 20 KB bảng trang, ít hơn cả bảng 1 cấp 64 KB của cấu hình 22 bit trong đề, dù không gian địa chỉ lớn hơn \(2^{35}\) lần.
 
 	\subsection{Lợi ích thiết kế}
-	\viet{Nhân}{Cấp phát bảng trang theo nhu cầu, đánh đổi số lần truy cập lấy dung lượng.}
+	\noindent\textbf{Cấp bảng trang theo nhu cầu.} \texttt{init\_mm()} chỉ cấp bảng PGD. Các bảng P4D, PUD, PMD và PT được \texttt{pgtbl\_walk(alloc = 1)} tạo khi lần đầu có trang nằm dưới chúng, còn tra cứu thì không bao giờ tạo bảng. Vùng địa chỉ không dùng tới không tốn bộ nhớ, nên dung lượng bảng trang tăng theo số vùng 2 MB mà tiến trình chạm tới chứ không theo độ lớn không gian địa chỉ. Cái giá phải trả là số lần đọc bảng: 5 lần cho một lần duyệt đầy đủ thay vì 1 lần như bảng phẳng. Page-walk cache bù lại phần lớn, các test của nhóm chỉ tốn từ 1,14 đến 2,00 lần đọc bảng cho mỗi lần dịch.
+
+	\medskip
+	\noindent\textbf{Mỗi tiến trình một cây, nửa kernel dùng chung.} Cùng một địa chỉ user ở hai tiến trình đi qua hai cây khác nhau và cho hai frame khác nhau (test T7). Địa chỉ kernel luôn đi qua \texttt{krnl->krnl\_pgd}, nên mọi tiến trình thấy cùng một PTE kernel và kernel space giống nhau ở mọi tiến trình như đề yêu cầu (trang 19). Trang kernel không được đưa vào hàng đợi FIFO nên không bị chọn làm nạn nhân khi swap.
+
+	\medskip
+	\noindent\textbf{Kiểm tra ngay trong bước duyệt.} Địa chỉ non-canonical và địa chỉ trong PAGEZERO bị từ chối trước khi đọc bảng nào, và được đếm vào \texttt{faults}.
+
+	\medskip
+	\noindent\textbf{Đồng bộ.} Cây kernel và danh sách frame trống được nhiều CPU dùng chung, nên mọi hàm public của \texttt{mm64.c} đều chạy dưới \texttt{pgtbl\_lock}. Khi một luồng giữ cả hai khóa, \texttt{pgtbl\_lock} luôn được lấy sau \texttt{mmvm\_lock} của \texttt{libmem.c}; trong lúc giữ \texttt{pgtbl\_lock}, \texttt{mm64.c} không gọi ngược ra \texttt{libmem.c}, nên không có vòng chờ. Test T19 cho 4 luồng cùng map 256 trang: không trang nào thiếu và không frame nào bị cấp hai lần.
+
+	\medskip
+	\noindent\textbf{Xóa trắng frame trước khi cấp.} Frame do tiến trình cũ trả lại được xóa về 0 ngay trước khi cấp cho chủ mới (\texttt{mm64\_zero\_frame()}), theo kỹ thuật zero-fill-on-demand ở Chương 9. Tiến trình sau không đọc được dữ liệu của tiến trình trước (test T21).
+	% Đoạn xóa trắng frame dựa trên nhánh nhan/kmalloc-contig-zerofill; bỏ nếu nhánh này chưa merge vào main.
+
+	\medskip
+	\noindent\textbf{Giới hạn.} Trường FPN của PTE chỉ có 13 bit theo định dạng của đề, nên chỉ đánh địa chỉ được 8192 frame, tức 32 MiB RAM với trang 4 KB; \texttt{pte\_set\_fpn()} báo lỗi thay vì cắt bớt bit. Các bảng trang nằm trên heap của simulator chứ không chiếm frame của RAM mô phỏng, vì cấu hình nhỏ nhất (\texttt{os\_1\_mlq\_paging\_small\_4K}) chỉ có 1 frame. Dung lượng ở bảng~\ref{tab:nhan-size} vẫn tính mỗi bảng bằng một trang 4 KB. Page-walk cache chỉ có một entry, nên truy cập xen kẽ hai vùng xa nhau không được lợi gì.
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
 	    \item \textbf{What are the benefits of extending hierarchical paging to N level?}
-	    \viet{Nhân}{Trả lời Q5.}
+
+	    Phân trang phân cấp là phân trang chính bảng trang (Chương 8): số trang được tách thành nhiều chỉ số, mỗi chỉ số tra trong một bảng nhỏ. Với 32 bit và trang 4 KB, bảng 1 cấp đã cần 4 MB liên tục cho mỗi tiến trình; với 64 bit, Chương 8 chỉ ra 2 cấp vẫn để lại bảng ngoài \(2^{42}\) entry, nên phải thêm cấp. Tăng lên \(N\) cấp có các lợi ích sau.
+	    \begin{itemize}
+	        \item Dung lượng bảng trang tỉ lệ với vùng nhớ thật sự dùng. Vùng không dùng không có bảng con. Tiến trình của nhóm chỉ tốn 4 đến 24 KB, trong khi bảng phẳng cho 57 bit cần 256 TiB (bảng~\ref{tab:nhan-size}).
+	        \item Mỗi bảng vừa đúng một trang, nên có thể cấp và giải phóng như một frame bình thường, không cần một vùng nhớ lớn liên tục.
+	        \item Không gian địa chỉ mở rộng bằng cách thêm một cấp mà không đổi định dạng các cấp dưới. x86-64 dùng 4 cấp cho 48 bit; thêm P4D thành 5 cấp cho 57 bit như bài này.
+	        \item Có thể dùng chung cả một cây con. Nhóm cho mọi tiến trình dùng chung cây kernel qua \texttt{krnl\_pgd}, nên kernel space giống nhau ở mọi tiến trình mà không phải chép bảng.
+	        \item Entry ở cấp trên phủ vùng lớn (2 MiB ở PMD, 1 GiB ở PUD), nên phần cứng thật có thể dừng sớm để map trang lớn và giảm số lần TLB miss.
+	    \end{itemize}
+	    Đổi lại, mỗi lần dịch không trúng cache phải đọc \(N\) bảng, tức \(N+1\) lần truy cập bộ nhớ cho một lần đọc dữ liệu. Vì vậy phân trang nhiều cấp luôn đi cùng TLB hoặc cache cho bảng trang. Trong simulator, page-walk cache đưa số lần đọc bảng từ 5 xuống còn 1,14 đến 2,00 cho mỗi lần dịch (bảng~\ref{tab:nhan-access}).
 	\end{enumerate}
 
 	% ===========================================================
