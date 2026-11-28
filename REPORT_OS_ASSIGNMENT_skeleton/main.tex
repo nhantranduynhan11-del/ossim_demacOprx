@@ -22,18 +22,20 @@
 % Thiết lập header và footer
 \pagestyle{fancy}
 \fancyhf{}
+\setlength{\headheight}{38pt}
 
 \fancyhead[L]{%
-	\begin{minipage}{0.4\textwidth}
-		\includegraphics[width=\linewidth]{bk_name_vi.png}
-	\end{minipage}
+	\begin{minipage}[c]{1.6cm}
+		\includegraphics[height=1.1cm]{01_logobachkhoasang.png}
+	\end{minipage}%
+	\hspace{0.15cm}%
+	\begin{minipage}[c]{0.72\textwidth}
+		\small
+		Trường Đại học Bách khoa - ĐHQG-HCM\\
+		Khoa Khoa học và Kỹ thuật Máy tính
+	\end{minipage}%
 }
-\fancyhead[R]{%
-	\begin{minipage}{0.8\textwidth}
-		\raggedleft
-
-	\end{minipage}
-}
+\fancyhead[R]{}
 \renewcommand{\headrulewidth}{0.5pt}
 \usepackage{listings}
 \usepackage{xcolor}
@@ -149,7 +151,7 @@ make os
 	\hline
 	\textbf{Thành viên} & \textbf{MSSV} & \textbf{Phần phụ trách} \\
 	\hline
-	Hoàng Phạm Tiến Thành & 2413148 & \textcolor{gray}{\textit{[Thành] Điền phần code và phần báo cáo phụ trách}} \\
+	Hoàng Phạm Tiến Thành & 2413148 & Swapping, bộ nhớ kernel, giao tiếp user/kernel và cầu nối DMA đa trang. \\
 	\hline
 	Trần Duy Nhân & 2412439 & \textcolor{gray}{\textit{[Nhân] Điền phần code và phần báo cáo phụ trách}} \\
 	\hline
@@ -345,22 +347,65 @@ make os
 	% ===========================================================
 	% 6. MMU VÀ USER/KERNEL SPACE — THÀNH
 	% ===========================================================
+	\begingroup
+	\sloppy
 	\section{MMU and User/Kernel Spaces}
 
 	\subsection{Giao tiếp user/kernel qua PID}
-	\viet{Thành}{Syscall chỉ nhận PID, kernel tự tìm PCB; trích đoạn code chứng minh không truyền PCB trực tiếp.}
+	Để bảo đảm cách ly không gian địa chỉ, lớp thư viện người dùng (\texttt{src/libmem.c}) không bao giờ truyền trực tiếp con trỏ \texttt{struct pcb\_t*} vào nhân. Khi cần cấp phát, mở rộng VMA hay swap trang, hàm gọi \texttt{\_syscall(caller->krnl, caller->pid, 17, \&regs)} chỉ truyền định danh \texttt{pid} và các thanh ghi \texttt{regs}. Ở phía kernel (\texttt{src/sys\_mem.c}), \texttt{\_\_sys\_memmap()} tự tra cứu lại PCB từ \texttt{running\_list} thông qua \texttt{find\_running\_proc\_\allowbreak by\_pid(pid, krnl)} trước khi thao tác trên \texttt{caller->mm}:
+
+\begin{lstlisting}[language=C, caption={Giao tiếp qua PID giữa libmem.c và sys\_mem.c}]
+/* src/libmem.c: chỉ truyền caller->pid qua SYSCALL 17 */
+regs.a1 = SYSMEM_SWP_OP; regs.a2 = vicfpn; regs.a3 = swpfpn;
+if (_syscall(caller->krnl, caller->pid, 17, &regs) < 0) return -1;
+
+/* src/sys_mem.c: kernel tự tìm lại PCB hợp lệ từ PID */
+caller = find_running_proc_by_pid(pid, krnl);
+if (caller == NULL || caller->mm == NULL) return -1;
+\end{lstlisting}
 
 	\subsection{Truy cập bộ nhớ user và kernel}
-	\viet{Thành}{\texttt{\_\_read\_user\_mem}, \texttt{\_\_write\_user\_mem}: chặn địa chỉ kernel và PAGEZERO; \texttt{copy\_from\_user}, \texttt{copy\_to\_user}; output một lần truy cập địa chỉ kernel bị từ chối.}
+	\begin{itemize}[leftmargin=*]
+		\item \textbf{Phía user (\texttt{\_\_read\_user\_mem}, \texttt{\_\_write\_user\_mem}):} Đọc/ghi qua \texttt{user\_rg\_to\_va()} (và bản nội bộ \texttt{\_locked} để tránh tái khóa \texttt{mmvm\_lock}). Hàm kiểm tra \texttt{rgid}, khớp \texttt{rg->vmaid == vmaid}, kiểm tra biên nửa mở $[\texttt{rg\_start}, \texttt{rg\_end})$ và $[\texttt{vm\_start}, \texttt{vm\_end})$, đồng thời chặn tuyệt đối địa chỉ kernel (\texttt{PAGING64\_IS\_\allowbreak KERNEL\_ADDR}) và vùng \texttt{PAGEZERO} ($< \texttt{0x1000}$), trả \texttt{-1} nếu vi phạm.
+		\item \textbf{Phía kernel (\texttt{\_\_read\_kernel\_mem}, \texttt{\_\_write\_kernel\_mem}):} Thao tác trên \texttt{caller->krnl->mm}, kiểm tra \texttt{kernel\_va\_to\_pa()} bảo đảm địa chỉ thuộc dải kernel ($\ge \texttt{KERNEL\_BASE\_ADDR}$) rồi đọc/ghi vật lý qua \texttt{SYSCALL 17} (\texttt{SYSMEM\_IO\_READ} / \texttt{SYSMEM\_IO\_WRITE}).
+		\item \textbf{Trao đổi qua ranh giới (\texttt{libkmem\_copy\_from\_user}, \texttt{libkmem\_copy\_to\_user}):} Giữ thứ tự khóa cố định \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, kiểm tra chống tràn số và lấy \texttt{vmaid} động từ \texttt{src\_rg->vmaid} / \texttt{dst\_rg->vmaid} (tương thích 3 vùng Small/Medium/Large), rồi sao chép từng byte qua các hàm đọc/ghi hai không gian.
+	\end{itemize}
+
+	Thực nghiệm với \texttt{khoi\_kernel\_protection\_test} cho thấy lệnh user \texttt{read}/\texttt{write} nhắm vào vùng kernel \texttt{rgid=2} (địa chỉ \texttt{0xff00000000000000}) bị từ chối ở lớp user (\texttt{walks=1}), không chạm bảng trang kernel; còn \texttt{khoi\_kernel\_copy\_test} sao chép khứ hồi qua \texttt{copy\_from\_user} và \texttt{copy\_to\_user} trả về đúng dữ liệu \texttt{ABCD}:
+
+\begin{lstlisting}[caption={Output thực tế kiểm thử bảo vệ và copy user/kernel}]
+$ ./os khoi_kernel_protection_test
+[KMALLOC TEST] pid=1 rgid=2 size=100 va=0xff00000000000000 present=1 fpn=1
+[PGTBL-STAT] PID 1: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=1 ... faults=0
+$ OSSIM_KERNEL_COPY_TEST=1 ./os khoi_kernel_copy_test
+[KERNEL COPY TEST] FROM_USER pid=1 status=0
+[KERNEL COPY TEST] TO_USER pid=1 status=0
+[KERNEL COPY TEST] PASS: user->kernel->user data=ABCD
+\end{lstlisting}
 
 	\subsection{Swapping}
-	\viet{Thành}{Luồng \texttt{pg\_getpage}: peek victim, swap có kiểm tra lỗi, rồi mới remove khỏi FIFO; bỏ qua frame đang bị DMA ghim.}
+	Hàm \texttt{pg\_getpage()} bảo đảm trang \texttt{pgn} có mặt trên RAM trước khi đọc/ghi theo cơ chế giao dịch (trả \texttt{0} khi thành công, \texttt{-1} khi lỗi):
+	\begin{enumerate}[leftmargin=*]
+		\item Từ chối ngay (\texttt{-1}) nếu PTE chưa ánh xạ (\texttt{!PRESENT \&\& !SWAPPED}).
+		\item Nếu trang đang ở SWAP (\texttt{!PRESENT \&\& SWAPPED}): xin khung trống \texttt{swpfpn} trong \texttt{active\_mswp}, rồi gọi \texttt{peek\_victim\_page()} tìm trang cũ nhất trong \texttt{fifo\_pgn} đang \texttt{PRESENT} và \textbf{không bị DMA ghim} (\texttt{!dma\_frame\_is\_pinned(fpn)}) mà chưa xóa khỏi FIFO.
+		\item Swap-out nạn nhân (\texttt{SYSCALL 17} -- \texttt{SYSMEM\_SWP\_OP}), swap-in trang đích (\texttt{\_\_swap\_cp\_page}), cập nhật \texttt{pte\_set\_swap()} và \texttt{pte\_set\_fpn()}. Nếu bất kỳ bước nào lỗi, hàm rollback khôi phục dữ liệu/PTE, trả lại \texttt{swpfpn} và trả \texttt{-1}.
+		\item Chỉ khi mọi bước thành công mới gọi \texttt{remove\_fifo\_page()} để xóa nạn nhân khỏi FIFO, trả ô \texttt{tgtfpn} về SWAP và thêm \texttt{pgn} vào đầu \texttt{fifo\_pgn}.
+	\end{enumerate}
+	\textit{Lưu ý thực nghiệm:} Đường swap-in và kiểm tra rollback trong \texttt{pg\_getpage()} đã hoàn thiện về logic, tuy nhiên trong bộ test hiện tại \texttt{vm\_map\_ram()} trả lỗi OOM khi hết khung RAM lúc cấp phát mới nên nhánh swap-in chưa được kích hoạt tự động khi thiếu RAM.
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
 	    \item \textbf{What are the advantages and disadvantages of using the unified system call interface for manipulating different system components, i.e. read/write/free for files, memory and I/O devices?}
-	    \viet{Thành}{Trả lời Q1: thiết kế OS, hiệu năng, xử lý lỗi, tính di động; liên hệ syscall \texttt{memmap} gom nhiều thao tác.}
+
+	    \begin{itemize}[leftmargin=*]
+	        \item \textbf{Thiết kế OS:} \textit{Ưu:} Thu gọn bảng system call, thống nhất điểm kiểm tra tham số, phân quyền và quản lý tài nguyên (tương tự mô hình \textit{everything is a file}). \textit{Nhược:} Cần thêm tầng giải mã (dispatcher) và có thể làm interface kém rõ ràng về ngữ nghĩa riêng của từng thiết bị.
+	        \item \textbf{Hiệu năng:} \textit{Ưu:} Dễ tối ưu chung đường dẫn trap/context-switch. \textit{Nhược:} Tốn thêm chi phí rẽ nhánh/đóng gói tham số tổng quát; với luồng dữ liệu lớn không linh hoạt bằng cơ chế riêng (như DMA).
+	        \item \textbf{Xử lý lỗi:} \textit{Ưu:} Thống nhất quy ước mã trả về (ví dụ \texttt{0} thành công, \texttt{-1} lỗi). \textit{Nhược:} Mã lỗi chung dễ che giấu nguyên nhân chi tiết nếu không chuẩn hóa thêm biến lỗi riêng.
+	        \item \textbf{Tính di động (Portability):} \textit{Ưu:} Ứng dụng chỉ phụ thuộc vào một bộ giao diện chuẩn, dễ thay thế driver hoặc kiến trúc phần cứng bên dưới. \textit{Nhược:} Các thuộc tính đặc thù của phần cứng mới khó biểu đạt nếu thiếu phần mở rộng (\texttt{ioctl}-like).
+	        \item \textbf{Liên hệ code nhóm:} \texttt{SYSCALL 17} (\texttt{\_\_sys\_memmap} trong \texttt{src/sys\_mem.c}) gộp 5 thao tác khác nhau (\texttt{SYSMEM\_MAP\_OP}, \texttt{SYSMEM\_INC\_OP}, \texttt{SYSMEM\_SWP\_OP}, \texttt{SYSMEM\_IO\_READ}, \texttt{SYSMEM\_IO\_WRITE}) qua cùng chữ ký \texttt{(krnl, pid, regs)}. Cách làm này giúp gọn bảng \texttt{syscall.tbl} và thống nhất việc tra \texttt{caller} qua \texttt{pid}, đổi lại phải tự quy ước ý nghĩa từng thanh ghi \texttt{a1..a3} cho mỗi nhánh \texttt{switch}.
+	    \end{itemize}
 	\end{enumerate}
+	\endgroup
 
 	% ===========================================================
 	% 7. CO-PROCESSOR DMA — KHÔI (7.1) + THÀNH (7.2)
@@ -455,21 +500,81 @@ CPU 0: Processed  1 has finished
   
 
 	\subsection{Bus addressing: DMA truy cập bộ nhớ}
-	\viet{Thành}{\texttt{libmem\_dma\_memcpy}: kéo trang từ SWAP lên rồi ghim, chia đoạn theo trang, submit không chờ; output một lần DMA vắt qua nhiều trang.}
+	Hàm \texttt{libmem\_dma\_memcpy()} (\texttt{src/libmem.c}) làm cầu nối chuẩn bị địa chỉ vật lý cho bộ điều khiển DMA theo quy trình 2 pha an toàn và không chặn CPU:
+	\begin{enumerate}[leftmargin=*]
+		\item \textbf{Kiểm tra hợp lệ:} Khóa \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, xác thực nguồn nằm ở user (không thuộc \texttt{PAGEZERO}), đích nằm ở kernel ($\ge \texttt{KERNEL\_BASE\_ADDR}$), kiểm tra biên $[\texttt{start}, \texttt{end})$ và căn lề 4 byte (\texttt{\& 3U == 0}) cho địa chỉ lẫn độ dài theo yêu cầu bus RTL DMA.
+		\item \textbf{Chia đoạn theo ranh giới trang 4 KB:} Vì một vùng ảo liên tục (nhất là trong vùng \texttt{LARGE}) có thể ánh xạ sang các khung vật lý không liền kề nhau trong \texttt{mram}, hàm cắt yêu cầu thành từng đoạn có độ dài $\text{seg} = \min(\text{rem},\; 4096 - \text{off}_{\text{src}},\; 4096 - \text{off}_{\text{dst}})$.
+		\item \textbf{Pha 1 -- Nạp trang từ SWAP và ghim ngay:} Duyệt từng đoạn, nếu trang nguồn đang ở SWAP (\texttt{!PRESENT \&\& SWAPPED}) thì gọi \texttt{pg\_getpage()} kéo lên RAM trước, rồi gọi ngay \texttt{mm64\_dma\_pin\_user\_page()} và \texttt{mm64\_dma\_pin\_kernel\_page()} để ghim chặt khung vật lý (tránh trang đoạn đầu bị đuổi khi nạp đoạn sau). Nếu lỗi ở bất kỳ đoạn nào, \texttt{dma\_unpin\_seg\_range()} tự tháo hết các ghim đã tạo và trả \texttt{-1}.
+		\item \textbf{Pha 2 -- Gửi bất đồng bộ:} Gọi \texttt{dma\_submit\_pinned\_with\_id()} đẩy lần lượt các đoạn đã ghim vào hàng đợi DMA rồi trả \texttt{0} ngay lập tức để CPU chạy tiếp tiến trình khác; quyền unpin thuộc về ISR khi hoàn tất (hoặc tháo ghim phần đuôi chưa nộp nếu submit lỗi).
+	\end{enumerate}
+
+	Kiểm thử truyền \texttt{10000} byte từ offset \texttt{100} trong vùng \texttt{LARGE} (\texttt{alloc 12000 1} $\to$ \texttt{kmalloc 12000 2}) ghi nhận DMA tự tách đúng 3 đoạn (\texttt{3996 B}, \texttt{4096 B}, \texttt{1908 B}), CPU chạy tiếp \texttt{CALC} với \texttt{dma\_pending=1}, và cả 3 đoạn hoàn tất qua ngắt \texttt{SIGUSR1}:
+
+\begin{lstlisting}[caption={Output DMA vắt qua 3 trang vật lý (10000 B tại offset 100)}]
+[KMALLOC TEST] pid=1 rgid=2 size=12000 va=0xff00000000000000 present=1 fpn=3
+[DMA] SUBMIT id=1 len=3996
+[DMA] SUBMIT id=2 len=4096
+[DMA] SUBMIT id=3 len=1908
+[DMA ASYNC TEST] CPU reached CALC pid=1 dma_pending=1
+[DMA] Deferred PCB cleanup PID=1
+[CPU SIGNAL] CPU 0 received SIGUSR1
+[CPU IRQ] CPU 0 handling DMA id=1   ->  [DMA] TRANSFER_DONE id=1
+[CPU IRQ] CPU 0 handling DMA id=2   ->  [DMA] TRANSFER_DONE id=2
+[CPU IRQ] CPU 0 handling DMA id=3   ->  [DMA] TRANSFER_DONE id=3
+\end{lstlisting}
 
 	% ===========================================================
 	% 8. ĐỒNG BỘ HÓA — THÀNH
 	% ===========================================================
+	\begingroup
+	\sloppy
 	\section{Synchronization}
 
 	\subsection{Tài nguyên dùng chung và khóa}
-	\viet{Thành}{Bảng: tài nguyên dùng chung (hàng đợi, running\_list, RAM, SWAP, bảng trang, danh sách pin DMA, hàng đợi IRQ) và khóa bảo vệ tương ứng.}
+	Do hệ thống chạy đa luồng (nhiều CPU, luồng \texttt{co\_processor} DMA và luồng \texttt{timer}), các cấu trúc dữ liệu dùng chung được bảo vệ bởi các khóa mutex, biến điều kiện và cờ atomic như Bảng~\ref{tab:sync_locks}.
+
+	\begin{table}[H]
+	\centering
+	\footnotesize
+	\setlength{\tabcolsep}{4pt}
+	\renewcommand{\arraystretch}{1.15}
+	\begin{tabularx}{\linewidth}{| >{\raggedright\arraybackslash}p{4.0cm} | >{\raggedright\arraybackslash}p{3.3cm} | >{\raggedright\arraybackslash}p{2.3cm} | >{\raggedright\arraybackslash}X |}
+	\hline
+	\textbf{Tài nguyên dùng chung} & \textbf{Khóa / Cơ chế} & \textbf{File} & \textbf{Mục đích bảo vệ} \\
+	\hline
+	\texttt{mlq\_ready\_queue}, \texttt{ready\_queue}, \texttt{run\_queue}, \texttt{running\_list}, \texttt{slot[]} & \texttt{queue\_lock} & \texttt{src/sched.c} & Đồng bộ các CPU khi lấy/đẩy PCB vào hàng đợi lập lịch. \\
+	\hline
+	User \texttt{symrgtbl}, \texttt{vm\_freerg\_list}, \texttt{fifo\_pgn} & \texttt{mmvm\_lock} & \texttt{src/libmem.c} & Tuần tự hóa \texttt{alloc/free}, đọc/ghi user và swap trang. \\
+	\hline
+	Kernel \texttt{krnl->mm}, \texttt{symrgtbl}, \texttt{sbrk} & \texttt{kmm\_lock} & \texttt{src/libmem.c} & Bảo vệ cấp phát (\texttt{\_\_kmalloc}) và truy cập vùng nhớ kernel. \\
+	\hline
+	Cây bảng trang 5 cấp, \texttt{pgstat}, \texttt{free\_fp\_list} & \texttt{pgtbl\_lock} & \texttt{src/mm64.c} & Bảo vệ dịch/cập nhật PTE và cấp phát khung RAM vật lý. \\
+	\hline
+	\texttt{dma\_head}, \texttt{dma\_irq\_head}, \texttt{dma\_pin\_head}, \texttt{cpu\_alive[]} & \texttt{dma\_mutex}, \texttt{dma\_cond} & \texttt{src/os.c} & Bảo vệ hàng đợi DMA/IRQ, refcount pin frame và đánh thức worker DMA. \\
+	\hline
+	Cờ báo ngắt DMA trên từng luồng CPU & \texttt{cpu\_irq\_pending} (\texttt{sig\_atomic\_t}) & \texttt{src/os.c} & Ghi nhận \texttt{SIGUSR1} an toàn trong signal handler, không dùng mutex. \\
+	\hline
+	Nhịp đồng bộ \texttt{time\_slot} giữa Timer và CPU & \texttt{event\_lock}, \texttt{event\_cond}, \texttt{timer\_lock}, \texttt{timer\_cond} & \texttt{src/timer.c} & Đồng bộ các thiết bị kết thúc xử lý trong mỗi time slot. \\
+	\hline
+	\end{tabularx}
+	\caption{Các tài nguyên dùng chung và cơ chế đồng bộ trong Simple OS}
+	\label{tab:sync_locks}
+	\end{table}
+
+	Để tránh deadlock khi thao tác chéo giữa không gian user và kernel (\texttt{libkmem\_copy\_from\_user}, \texttt{libkmem\_copy\_to\_user}, \texttt{libmem\_dma\_memcpy}), hệ thống luôn áp dụng thứ tự khóa cố định \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock}, đồng thời tách cặp hàm nội bộ \texttt{\_\_read\_user\_mem\_locked} / \texttt{\_\_write\_user\_mem\_locked} để tránh tự khóa chồng lên chính mình.
 
 	\subsection{Trả lời câu hỏi}
 	\begin{enumerate}
 	    \item \textbf{What happens if the synchronization is not handled in your Simple OS? Illustrate the problem of your simple OS (assignment outputs) by example if you have any in the added kernel memory operations.}
-	    \viet{Thành}{Trả lời Q7, dùng kịch bản 2 CPU swap đúng frame đang được DMA chép.}
+
+	    Nếu thiếu đồng bộ hóa giữa các CPU và \texttt{co\_processor}, nhiều luồng sẽ sửa đổi đồng thời bảng trang, danh sách vùng trống và hàng đợi dùng chung, dẫn đến hỏng cấu trúc dữ liệu, cấp trùng khung RAM, sai lệch dữ liệu DMA hoặc deadlock toàn hệ thống.
+
+	    \begin{itemize}[leftmargin=*]
+	        \item \textbf{Ví dụ 1 -- Tranh chấp Swap và DMA (TOCTOU giữa 2 CPU và \texttt{co\_processor}):} Trong \texttt{find\_victim\_page()} / \texttt{peek\_victim\_page()}, thao tác đọc PTE (giữ \texttt{pgtbl\_lock}) và kiểm tra \texttt{!dma\_frame\_is\_pinned(fpn)} (giữ \texttt{dma\_mutex}) không nằm trong một khóa chung. Nếu đường swap \texttt{pg\_getpage()} không được tuần tự hóa bằng \texttt{mmvm\_lock} với \texttt{libmem\_dma\_memcpy()}: (1) CPU~0 chọn nạn nhân \texttt{vicpgn} ở khung \texttt{fpn=5} ngay lúc frame chưa bị pin; (2) CPU~1 vào \texttt{mm64\_dma\_pin\_user\_page()}, ghim \texttt{fpn=5} và gửi yêu cầu DMA; (3) \texttt{co\_processor} đọc dữ liệu ở \texttt{fpn=5}; (4) CPU~0 chạy tiếp \texttt{\_\_swap\_cp\_page()} ghi đè dữ liệu trang mới lên đúng \texttt{fpn=5} và đánh dấu \texttt{vicpgn} sang SWAP, làm sai dữ liệu DMA. Hệ thống ngăn chặn bằng cách giữ \texttt{mmvm\_lock} xuyên suốt mọi thao tác user/swap/DMA và bỏ qua frame đang pin trong \texttt{peek\_victim\_page()}.
+	        \item \textbf{Ví dụ 2 -- Deadlock trong thao tác bộ nhớ kernel:} Trong \texttt{libkmem\_copy\_from\_user()} và \texttt{libkmem\_copy\_to\_user()} đều cần khóa cả vùng user lẫn kernel. Nếu hai CPU khóa ngược thứ tự nhau (\texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} và ngược lại) sẽ kẹt deadlock AB--BA; hoặc nếu hàm đã giữ \texttt{mmvm\_lock} lại gọi \texttt{\_\_read\_user\_mem()} (cũng khóa \texttt{mmvm\_lock}) sẽ tự deadlock ngay lập tức. Quy tắc thứ tự khóa \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} cùng hai hàm \texttt{\_locked} đã loại bỏ hoàn toàn tình huống này (xác nhận qua test \texttt{khoi\_kernel\_copy\_test} chạy xong sạch với \texttt{status=0}).
+	    \end{itemize}
 	\end{enumerate}
+	\endgroup
 
 	% ===========================================================
 	% 9. KẾT LUẬN — LINH
