@@ -504,6 +504,90 @@ int main(void)
     free(seen);
   }
 
+  /* ---------------------------------------------------------------- */
+  printf("\n[T20] Kernel memory (KMALLOC) gets physically contiguous frames\n");
+  {
+    struct pcb_t *pa, *pb;
+    addr_t kva = KERNEL_BASE_ADDR + 0x400000ULL; /* a fresh kernel range */
+    addr_t f[4], x;
+    int k;
+
+    test_memphy_init(&mram, 8);                         /* free list 0..7 */
+    pa = new_proc(30);
+    vm_map_ram(pa, VA_S, VA_S + 0x4000, VA_S, 4, &rg);  /* frames 0,1,2,3 */
+    free_pcb_pgtbl(pa);                                 /* list: 3,2,1,0,4.. */
+    pb = new_proc(31);
+    vm_map_ram(pb, VA_S, VA_S + 0x1000, VA_S, 1, &rg);  /* takes frame 3 */
+    printf("  after a process exit the free list starts with fpn %" PRIu64
+           ", %" PRIu64 ", %" PRIu64 " (descending: the old allocator would map 2,1,0)\n",
+           (uint64_t)mram.free_fp_list->fpn, (uint64_t)mram.free_fp_list->fp_next->fpn,
+           (uint64_t)mram.free_fp_list->fp_next->fp_next->fpn);
+
+    CHECK(vm_map_ram(pb, 0, 0, kva, 3, &rg) == 0, "kernel mapping of 3 pages succeeds");
+    for (k = 0; k < 3; k++)
+      f[k] = PAGING_FPN(pte_get_entry(pb->mm, PAGING64_PGN(kva) + k, pb));
+    CHECK(f[1] == f[0] + 1 && f[2] == f[0] + 2,
+          "kernel pages map to consecutive frames %" PRIu64 ", %" PRIu64 ", %" PRIu64,
+          (uint64_t)f[0], (uint64_t)f[1], (uint64_t)f[2]);
+    CHECK(vm_map_ram(pb, 0, 0, kva + 0x3000, 4, &rg) == 0 &&
+          PAGING_FPN(pte_get_entry(pb->mm, PAGING64_PGN(kva) + 3, pb)) == 4 &&
+          PAGING_FPN(pte_get_entry(pb->mm, PAGING64_PGN(kva) + 6, pb)) == 7,
+          "the next 4 kernel pages take the run 4..7");
+
+    /* fragmented RAM: frames 0, 2, 4 free -> 3 free frames, no 2 in a row */
+    test_memphy_init(&mram, 6);
+    for (k = 0; k < 6; k++)
+      MEMPHY_get_freefp(&mram, &x);
+    MEMPHY_put_freefp(&mram, 4);
+    MEMPHY_put_freefp(&mram, 2);
+    MEMPHY_put_freefp(&mram, 0);
+    CHECK(vm_map_ram(pb, 0, 0, kva + 0x10000, 2, &rg) != 0 && nr_free_frames(&mram) == 3,
+          "3 free frames but none consecutive: 2-page kernel map refused, nothing taken");
+    CHECK(vm_map_ram(pb, 0, 0, kva + 0x10000, 1, &rg) == 0 &&
+          PAGING_FPN(pte_get_entry(pb->mm, PAGING64_PGN(kva + 0x10000), pb)) == 0 &&
+          nr_free_frames(&mram) == 2,
+          "a 1-page kernel map takes the lowest free frame (0)");
+    CHECK(vm_map_ram(pb, VA_M, VA_M + 0x2000, VA_M, 2, &rg) == 0,
+          "user pages still use any free frames (2 + 4 are not adjacent, still OK)");
+    free_pcb_pgtbl(pb);
+  }
+
+  /* ---------------------------------------------------------------- */
+  printf("\n[T21] Zero-fill-on-demand: a reused frame never shows old data\n");
+  {
+    struct pcb_t *pc, *pd;
+    struct framephy_struct *fp;
+    addr_t fpn, k, dirty = 0;
+
+    test_memphy_init(&mram, 4);
+    pc = new_proc(40);
+    vm_map_ram(pc, VA_S, VA_S + 0x1000, VA_S, 1, &rg);
+    fpn = PAGING_FPN(pte_get_entry(pc->mm, PAGING64_PGN(VA_S), pc));
+    memset(mram.storage + fpn * PAGING64_PAGESZ, 'S', PAGING64_PAGESZ); /* "secret" */
+    free_pcb_pgtbl(pc);
+
+    pd = new_proc(41);
+    vm_map_ram(pd, VA_S, VA_S + 0x1000, VA_S, 1, &rg);
+    CHECK(PAGING_FPN(pte_get_entry(pd->mm, PAGING64_PGN(VA_S), pd)) == fpn,
+          "the next process gets the same frame %" PRIu64, (uint64_t)fpn);
+    for (k = 0; k < PAGING64_PAGESZ; k++)
+      if (mram.storage[fpn * PAGING64_PAGESZ + k] != 0)
+        dirty++;
+    CHECK(dirty == 0, "user frame: all 4096 bytes are 0, the old 'S' data is gone");
+
+    /* kernel path: dirty every free frame, then map 2 kernel pages */
+    for (fp = mram.free_fp_list; fp != NULL; fp = fp->fp_next)
+      memset(mram.storage + fp->fpn * PAGING64_PAGESZ, 'K', PAGING64_PAGESZ);
+    CHECK(vm_map_ram(pd, 0, 0, KERNEL_BASE_ADDR + 0x800000ULL, 2, &rg) == 0, "2 kernel pages mapped");
+    fpn = PAGING_FPN(pte_get_entry(pd->mm, PAGING64_PGN(KERNEL_BASE_ADDR + 0x800000ULL), pd));
+    for (dirty = 0, k = 0; k < 2 * PAGING64_PAGESZ; k++)
+      if (mram.storage[fpn * PAGING64_PAGESZ + k] != 0)
+        dirty++;
+    CHECK(dirty == 0, "kernel frames %" PRIu64 "-%" PRIu64 ": all 8192 bytes are 0",
+          (uint64_t)fpn, (uint64_t)fpn + 1);
+    free_pcb_pgtbl(pd);
+  }
+
   printf("\n==== RESULT: %d passed, %d failed ====\n", nr_pass, nr_fail);
   return nr_fail ? 1 : 0;
 }

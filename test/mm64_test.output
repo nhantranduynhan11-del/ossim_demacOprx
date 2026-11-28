@@ -108,7 +108,7 @@
 
 [T17] print_pgtbl(P1, 0, -1): pages, statistics and layout
 print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
- PDG=00000220d8b6df40 P4D=00000220d8b74400 PUD=00000220d8b75410 PMD=00000220d8b76420 PT=00000220d8b77430
+ PDG=000002ca75e6e070 P4D=000002ca75e74530 PUD=000002ca75e75540 PMD=000002ca75e76550 PT=000002ca75e77560
   va=0x0000000000010000 pgn=0x10 [PGD 000|P4D 000|PUD 000|PMD 000|PT 010] SMALL  -> fpn 0 (pa=0x0)
   va=0x0000000000011000 pgn=0x11 [PGD 000|P4D 000|PUD 000|PMD 000|PT 011] SMALL  -> fpn 1 (pa=0x1000)
   va=0x0000000000012000 pgn=0x12 [PGD 000|P4D 000|PUD 000|PMD 000|PT 012] SMALL  -> fpn 2 (pa=0x2000)
@@ -149,4 +149,28 @@ print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
  [PGTBL-STAT] PID 13: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=64 pt-mem-access=68 (1.06/walk) pwc-hit=63 faults=0
  [PGTBL-FREE] PID 13: released 32 RAM frame(s), 0 swap frame(s), 20480B of page tables
 
-==== RESULT: 72 passed, 0 failed ====
+[T20] Kernel memory (KMALLOC) gets physically contiguous frames
+ [PGTBL-STAT] PID 30: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=4 pt-mem-access=8 (2.00/walk) pwc-hit=3 faults=0
+ [PGTBL-FREE] PID 30: released 4 RAM frame(s), 0 swap frame(s), 20480B of page tables
+  after a process exit the free list starts with fpn 2, 1, 0 (descending: the old allocator would map 2,1,0)
+  [PASS] kernel mapping of 3 pages succeeds
+  [PASS] kernel pages map to consecutive frames 0, 1, 2
+  [PASS] the next 4 kernel pages take the run 4..7
+[mm64] vm_map_ram: PID 31 no 2 physically contiguous free frames for kernel memory
+  [PASS] 3 free frames but none consecutive: 2-page kernel map refused, nothing taken
+  [PASS] a 1-page kernel map takes the lowest free frame (0)
+  [PASS] user pages still use any free frames (2 + 4 are not adjacent, still OK)
+ [PGTBL-STAT] PID 31: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=3 pt-mem-access=7 (2.33/walk) pwc-hit=2 faults=0
+ [PGTBL-FREE] PID 31: released 3 RAM frame(s), 0 swap frame(s), 20480B of page tables
+
+[T21] Zero-fill-on-demand: a reused frame never shows old data
+ [PGTBL-STAT] PID 40: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=2 pt-mem-access=6 (3.00/walk) pwc-hit=1 faults=0
+ [PGTBL-FREE] PID 40: released 1 RAM frame(s), 0 swap frame(s), 20480B of page tables
+  [PASS] the next process gets the same frame 0
+  [PASS] user frame: all 4096 bytes are 0, the old 'S' data is gone
+  [PASS] 2 kernel pages mapped
+  [PASS] kernel frames 1-2: all 8192 bytes are 0
+ [PGTBL-STAT] PID 41: tables PGD=1 P4D=1 PUD=1 PMD=1 PT=1 size=20480B | walks=2 pt-mem-access=6 (3.00/walk) pwc-hit=1 faults=0
+ [PGTBL-FREE] PID 41: released 1 RAM frame(s), 0 swap frame(s), 20480B of page tables
+
+==== RESULT: 82 passed, 0 failed ====
