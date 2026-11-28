@@ -12,6 +12,7 @@
 \usepackage{caption}
 \usepackage{subcaption}
 \usepackage{tikz}
+\usetikzlibrary{arrows.meta}
 \usepackage{pgfplots}
 \usepackage{enumitem}
 \pgfplotsset{compat=1.18}
@@ -67,6 +68,8 @@
 \newcommand{\viet}[2]{\par\noindent\textcolor{gray}{\textit{[#1] #2}}\par\medskip}
 
 \begin{document}
+	\sloppy
+	\setlength{\emergencystretch}{2em}
 
 	%========================= TITLE PAGE =========================
 	\begin{titlepage}
@@ -153,11 +156,11 @@ make os
 	\hline
 	Hoàng Phạm Tiến Thành & 2413148 & Swapping, bộ nhớ kernel, giao tiếp user/kernel và cầu nối DMA đa trang. \\
 	\hline
-	Trần Duy Nhân & 2412439 & Phân trang 5 cấp và bố cục bộ nhớ kiểu macOS (\texttt{src/mm64.c}, \texttt{include/mm64.h}): duyệt bảng trang, cấp bảng theo nhu cầu, thống kê bảng trang, PAGEZERO và ba vùng SMALL/MEDIUM/LARGE, cấp frame liên tục cho bộ nhớ kernel. Báo cáo mục 3, mục 5 và Q5. \\
+	Trần Duy Nhân & 2412439 & Phân trang 5 cấp, bố cục bộ nhớ kiểu macOS (PAGEZERO, Small/Medium/Large) và thống kê bảng trang. \\
 	\hline
 	Đặng Bá Khôi & 2411679 & Scheduling, xử lý ngắt và DMA bất đồng bộ. \\
 	\hline
-	Huỳnh Nguyễn Yến Linh & 2411871 & \textcolor{gray}{\textit{[Linh] Điền phần code và phần báo cáo phụ trách}} \\
+	Huỳnh Nguyễn Yến Linh & 2411871 & Quản lý bộ nhớ ảo user-space (ALLOC/FREE, phân vùng Small/Medium/Large, quản lý khung vật lý). \\
 	\hline
 	\end{tabularx}
 	\caption{Phân công công việc của nhóm}
@@ -293,9 +296,12 @@ make os
 
 	Trong nửa user, \texttt{init\_mm()} (\texttt{src/mm64.c}) tạo ba VMA nối nhau \texttt{vma0} $\rightarrow$ \texttt{vma1} $\rightarrow$ \texttt{vma2}. Mỗi VMA có \texttt{sbrk} và danh sách vùng trống riêng, \texttt{sbrk} bắt đầu tại \texttt{vm\_start} và chỉ tăng trong vùng của mình. Kernel chỉ có một VMA, tạo bằng \texttt{init\_mm(os.mm, NULL)}. Mọi khoảng địa chỉ trong bảng~\ref{tab:memory_layout} là nửa mở \([start, end)\).
 
-	\begin{table}[H]
-	\centering\footnotesize
-	\begin{tabularx}{\linewidth}{|l|l|l|l|l|X|}
+	\begin{table}[htbp]
+	\centering
+	\scriptsize
+	\setlength{\tabcolsep}{3pt}
+	\renewcommand{\arraystretch}{1.15}
+	\begin{tabularx}{\linewidth}{| >{\raggedright\arraybackslash}p{1.8cm} | >{\raggedright\arraybackslash}p{2.75cm} | >{\raggedright\arraybackslash}p{1.6cm} | c | c | >{\raggedright\arraybackslash}X |}
 	\hline
 	\textbf{Vùng} & \textbf{Bắt đầu} & \textbf{Kết thúc} & \textbf{Kích thước} & \textbf{Căn chỉnh} & \textbf{Mô tả} \\
 	\hline
@@ -316,7 +322,7 @@ make os
 	\label{tab:memory_layout}
 	\end{table}
 
-	\begin{figure}[H]
+	\begin{figure}[htbp]
 	\centering
 	\begin{tikzpicture}[font=\footnotesize]
 	    \def\w{4.6}
@@ -498,10 +504,10 @@ liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
     \subsection{Trạng thái cấp phát}
     Bảng sau trình bày trạng thái các vùng nhớ (tương ứng với các trường \texttt{sbrk} và \texttt{free} trên dòng log \texttt{[LAYOUT]} của \texttt{print\_mm\_layout()}) sau một chuỗi lệnh \texttt{alloc}/\texttt{free} kiểm thử tại các ngưỡng phân vùng ($512\text{ B}$, $513\text{ B}$, $4097\text{ B}$) và thao tác giải phóng -- cấp phát lại.
     
-    \begin{table}[H]
+    \begin{table}[htbp]
     \centering
-    \small
-    \setlength{\tabcolsep}{4pt}
+    \footnotesize
+    \setlength{\tabcolsep}{3pt}
     \caption{Trạng thái các vùng nhớ ảo sau từng lệnh \texttt{alloc}/\texttt{free}}
     \label{tab:alloc_trace}
     \begin{tabularx}{\textwidth}{@{}clccc>{\raggedright\arraybackslash}X@{}}
@@ -631,11 +637,13 @@ print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
 	\end{itemize}
 
 	\noindent\textbf{Số lần truy cập bộ nhớ.} Duyệt đủ 5 cấp tốn 5 lần đọc bảng (PGD, P4D, PUD, PMD, PT), cộng 1 lần đọc dữ liệu. Để giảm con số này, \texttt{pgtbl\_walk()} giữ bảng PT của lần duyệt gần nhất trong \texttt{mm->pt} và gắn nhãn \(\mathrm{VA} \gg 21\) (một vùng 2 MB). Lần dịch tiếp theo trong cùng vùng 2 MB chỉ đọc 1 entry. Cách làm này giống paging-structure cache của CPU Intel; khác TLB ở chỗ vẫn phải đọc PTE. Bảng~\ref{tab:nhan-access} lấy từ dòng \texttt{[PGTBL-STAT]} khi các tiến trình kết thúc:
-	\begin{table}[H]
-	\centering\small
-	\begin{tabular}{lrrrrr}
+	\begin{table}[htbp]
+	\centering
+	\footnotesize
+	\setlength{\tabcolsep}{4pt}
+	\begin{tabularx}{\linewidth}{@{}Xrrrrr@{}}
 	\toprule
-	\textbf{Tiến trình (input)} & \textbf{Lần dịch} & \textbf{Đọc bảng} & \textbf{TB/lần} & \textbf{Trúng cache} & \textbf{Nếu không cache} \\
+	\textbf{Tiến trình (input)} & \textbf{Lần dịch} & \textbf{Đọc bảng} & \textbf{TB/lần} & \textbf{Trúng cache} & \textbf{Không cache} \\
 	\midrule
 	\texttt{p0s} (\texttt{os\_0\_mlq\_paging}) & 7 & 11 & 1,57 & 6 & 35 \\
 	\texttt{m0s} (\texttt{os\_1\_mlq\_paging}) & 4 & 8 & 2,00 & 3 & 20 \\
@@ -643,7 +651,7 @@ print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
 	\texttt{khoi\_dma\_data\_test} & 11 & 15 & 1,36 & 10 & 55 \\
 	\texttt{khoi\_kernel\_copy\_test} & 29 & 33 & 1,14 & 28 & 145 \\
 	\bottomrule
-	\end{tabular}
+	\end{tabularx}
 	\caption{Số lần đọc bảng trang khi chạy các input của nhóm}
 	\label{tab:nhan-access}
 	\end{table}
