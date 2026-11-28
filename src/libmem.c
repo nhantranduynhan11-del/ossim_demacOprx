@@ -522,7 +522,7 @@ int pg_getval(struct mm_struct *mm, addr_t addr, BYTE *data, struct pcb_t *calle
     return -1;  
 
 #ifdef MM64
-  if(PAGING64_IS_PAGEZERO_ADDR(addr))
+  if (PAGING64_IS_PAGEZERO_ADDR(addr) || PAGING64_IS_KERNEL_ADDR(addr))
     return -1;
 #endif
 
@@ -580,7 +580,7 @@ int pg_setval(struct mm_struct *mm, addr_t addr, BYTE value, struct pcb_t *calle
     return -1;
 
 #ifdef MM64
-  if(PAGING64_IS_PAGEZERO_ADDR(addr))
+  if (PAGING64_IS_PAGEZERO_ADDR(addr) || PAGING64_IS_KERNEL_ADDR(addr))
     return -1;
 #endif
 
@@ -633,7 +633,9 @@ int __read(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE *data)
   struct vm_rg_struct *currg = get_symrg_byid(caller->mm, rgid);
   cur_vma = get_vma_by_num(caller->mm, vmaid);
 
-  if(currg == NULL || cur_vma == NULL || currg->vmaid != vmaid || offset >= (currg->rg_end - currg->rg_start)){
+  if (currg == NULL || cur_vma == NULL || currg->vmaid != vmaid ||
+      currg->rg_start >= currg->rg_end ||
+      offset >= (currg->rg_end - currg->rg_start)) {
     pthread_mutex_unlock(&mmvm_lock);
     return -1;
   }
@@ -696,7 +698,9 @@ int __write(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE value
   struct vm_area_struct *cur_vma = get_vma_by_num(caller->mm, vmaid);
   int ret;
 
-  if (currg == NULL || cur_vma == NULL || currg->vmaid != vmaid || offset >= (currg->rg_end - currg->rg_start)) /* Invalid memory identify */
+  if (currg == NULL || cur_vma == NULL || currg->vmaid != vmaid ||
+      currg->rg_start >= currg->rg_end ||
+      offset >= (currg->rg_end - currg->rg_start)) /* Invalid memory identify */
   {
     pthread_mutex_unlock(&mmvm_lock);
     return -1;
@@ -1506,6 +1510,12 @@ int __write_user_mem(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, B
  */
 int free_pcb_memph(struct pcb_t *caller)
 {
+  if (caller == NULL || caller->mm == NULL)
+    return -1;
+
+#ifdef MM64
+  return free_pcb_pgtbl(caller);
+#else
   pthread_mutex_lock(&mmvm_lock);
   int pagenum, fpn;
   uint32_t pte;
@@ -1528,6 +1538,7 @@ int free_pcb_memph(struct pcb_t *caller)
 
   pthread_mutex_unlock(&mmvm_lock);
   return 0;
+#endif
 }
 
 /*

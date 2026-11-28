@@ -1076,6 +1076,9 @@ static void * ld_routine(void * args) {
 	}
 	free(ld_processes.path);
 	free(ld_processes.start_time);
+#ifdef MLQ_SCHED
+	free(ld_processes.prio);
+#endif
 	done = 1;
 	detach_event(timer_id);
 	pthread_exit(NULL);
@@ -1225,6 +1228,7 @@ static void read_config(const char * path) {
 #endif
 		strcat(ld_processes.path[i], proc);
 	}
+	fclose(file);
 }
 
 int main(int argc, char * argv[]) {

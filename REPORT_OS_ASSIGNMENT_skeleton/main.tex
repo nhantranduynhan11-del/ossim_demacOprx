@@ -388,7 +388,6 @@ liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
 
 	\medskip
 	\noindent\textbf{Phối hợp với DMA.} Chip DMA RTL yêu cầu địa chỉ và độ dài chia hết cho 4, và \texttt{libmem\_dma\_memcpy()} kiểm tra điều kiện này trước khi gửi yêu cầu. Mọi vùng đều căn từ 16 B trở lên nên địa chỉ bắt đầu của bất kỳ khối nào cũng thỏa. Khối LARGE bắt đầu ở biên trang, nên nếu buffer đích cũng căn theo trang thì một lần chép 8192 B chỉ cần 2 đoạn, mỗi đoạn trọn một trang. Khối SMALL và MEDIUM có thể vắt qua biên trang; khi đó \texttt{libmem\_dma\_memcpy()} tách yêu cầu theo trang (mục 7.2). Ở phía kernel, \texttt{vm\_map\_ram()} cấp các frame liên tục vật lý cho mọi địa chỉ kernel bằng \texttt{alloc\_contig\_pages\_range()}. Đề yêu cầu \texttt{KMALLOC} trả về vùng nhớ liên tục vật lý, và Chương 9 cũng giải thích lý do: thiết bị như DMA truy cập RAM trực tiếp nên cần một khối liền nhau, bộ nhớ kernel vì thế được cấp bằng buddy system hoặc slab.
-	% Câu về alloc_contig_pages_range() dựa trên nhánh nhan/kmalloc-contig-zerofill; bỏ nếu nhánh này chưa merge vào main.
 
 	\medskip
 	\noindent\textbf{Ít tốn bảng trang.} Cả ba vùng nằm trong 16 MB đầu nên dùng chung PGD[0], P4D[0], PUD[0] và một bảng PMD. SMALL và MEDIUM cùng nằm trong vùng 2 MB đầu tiên nên dùng chung một bảng PT; LARGE bắt đầu ở vùng 2 MB thứ ba nên cần thêm một PT. Một tiến trình dùng cả ba vùng chỉ tốn 6 bảng, tức 24 KB (test T6 của \texttt{mm64test}).
@@ -695,7 +694,6 @@ print_pgtbl: PID 1 VA[0x0000000000000000 - 0xffffffffffffffff]
 
 	\medskip
 	\noindent\textbf{Xóa trắng frame trước khi cấp.} Frame do tiến trình cũ trả lại được xóa về 0 ngay trước khi cấp cho chủ mới (\texttt{mm64\_zero\_frame()}), theo kỹ thuật zero-fill-on-demand ở Chương 9. Tiến trình sau không đọc được dữ liệu của tiến trình trước (test T21).
-	% Đoạn xóa trắng frame dựa trên nhánh nhan/kmalloc-contig-zerofill; bỏ nếu nhánh này chưa merge vào main.
 
 	\medskip
 	\noindent\textbf{Giới hạn.} Trường FPN của PTE chỉ có 13 bit theo định dạng của đề, nên chỉ đánh địa chỉ được 8192 frame, tức 32 MiB RAM với trang 4 KB; \texttt{pte\_set\_fpn()} báo lỗi thay vì cắt bớt bit. Các bảng trang nằm trên heap của simulator chứ không chiếm frame của RAM mô phỏng, vì cấu hình nhỏ nhất (\texttt{os\_1\_mlq\_paging\_small\_4K}) chỉ có 1 frame. Dung lượng ở bảng~\ref{tab:nhan-size} vẫn tính mỗi bảng bằng một trang 4 KB. Page-walk cache chỉ có một entry, nên truy cập xen kẽ hai vùng xa nhau không được lợi gì.
@@ -921,6 +919,8 @@ CPU 0: Processed  1 has finished
 	\hline
 	Cây bảng trang 5 cấp, \texttt{pgstat}, \texttt{free\_fp\_list} & \texttt{pgtbl\_lock} & \texttt{src/mm64.c} & Bảo vệ dịch/cập nhật PTE và cấp phát khung RAM vật lý. \\
 	\hline
+	Danh sách \texttt{free\_fp\_list} (RAM / SWAP) & \texttt{memphy\_fp\_lock} & \texttt{src/\allowbreak mm-memphy.c} & Đồng bộ thao tác lấy/trả khung trong \texttt{MEMPHY\_get\_\allowbreak freefp()} và \texttt{MEMPHY\_put\_\allowbreak freefp()}. \\
+	\hline
 	\texttt{dma\_head}, \texttt{dma\_irq\_head}, \texttt{dma\_pin\_head}, \texttt{cpu\_alive[]} & \texttt{dma\_mutex}, \texttt{dma\_cond} & \texttt{src/os.c} & Bảo vệ hàng đợi DMA/IRQ, refcount pin frame và đánh thức worker DMA. \\
 	\hline
 	Cờ báo ngắt DMA trên từng luồng CPU & \texttt{cpu\_irq\_pending} (\texttt{sig\_atomic\_t}) & \texttt{src/os.c} & Ghi nhận \texttt{SIGUSR1} an toàn trong signal handler, không dùng mutex. \\
@@ -942,7 +942,7 @@ CPU 0: Processed  1 has finished
 
 	    \begin{itemize}[leftmargin=*]
 	        \item \textbf{Ví dụ 1 -- Tranh chấp Swap và DMA (TOCTOU giữa 2 CPU và \texttt{co\_processor}):} Trong \texttt{find\_victim\_page()} / \texttt{peek\_victim\_page()}, thao tác đọc PTE (giữ \texttt{pgtbl\_lock}) và kiểm tra \texttt{!dma\_frame\_is\_pinned(fpn)} (giữ \texttt{dma\_mutex}) không nằm trong một khóa chung. Nếu đường swap \texttt{pg\_getpage()} không được tuần tự hóa bằng \texttt{mmvm\_lock} với \texttt{libmem\_dma\_memcpy()}: (1) CPU~0 chọn nạn nhân \texttt{vicpgn} ở khung \texttt{fpn=5} ngay lúc frame chưa bị pin; (2) CPU~1 vào \texttt{mm64\_dma\_pin\_user\_page()}, ghim \texttt{fpn=5} và gửi yêu cầu DMA; (3) \texttt{co\_processor} đọc dữ liệu ở \texttt{fpn=5}; (4) CPU~0 chạy tiếp \texttt{\_\_swap\_cp\_page()} ghi đè dữ liệu trang mới lên đúng \texttt{fpn=5} và đánh dấu \texttt{vicpgn} sang SWAP, làm sai dữ liệu DMA. Hệ thống ngăn chặn bằng cách giữ \texttt{mmvm\_lock} xuyên suốt mọi thao tác user/swap/DMA và bỏ qua frame đang pin trong \texttt{peek\_victim\_page()}.
-	        \item \textbf{Ví dụ 2 -- Deadlock trong thao tác bộ nhớ kernel:} Trong \texttt{libkmem\_copy\_from\_user()} và \texttt{libkmem\_copy\_to\_user()} đều cần khóa cả vùng user lẫn kernel. Nếu hai CPU khóa ngược thứ tự nhau (\texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} và ngược lại) sẽ kẹt deadlock AB--BA; hoặc nếu hàm đã giữ \texttt{mmvm\_lock} lại gọi \texttt{\_\_read\_user\_mem()} (cũng khóa \texttt{mmvm\_lock}) sẽ tự deadlock ngay lập tức. Quy tắc thứ tự khóa \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} cùng hai hàm \texttt{\_locked} đã loại bỏ hoàn toàn tình huống này (xác nhận qua test \texttt{khoi\_kernel\_copy\_test} chạy xong sạch với \texttt{status=0}).
+	        \item \textbf{Ví dụ 2 -- Deadlock trong thao tác bộ nhớ kernel:} Trong \texttt{libkmem\_copy\_from\_user()} và \texttt{libkmem\_copy\_to\_user()} đều cần khóa cả vùng user lẫn kernel. Nếu hai CPU khóa ngược thứ tự nhau (\texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} và ngược lại) sẽ kẹt deadlock AB--BA; hoặc nếu hàm đã giữ \texttt{mmvm\_lock} lại gọi \texttt{\_\_read\_user\_mem()} (cũng khóa \texttt{mmvm\_lock}) sẽ tự deadlock ngay lập tức. Quy tắc thứ tự khóa \texttt{mmvm\_lock} $\to$ \texttt{kmm\_lock} cùng các hàm \texttt{\_locked} đã loại bỏ hoàn toàn tình huống này (xác nhận qua test \texttt{khoi\_kernel\_copy\_test} chạy xong sạch với \texttt{status=0}).
 	    \end{itemize}
 	\end{enumerate}
 	\endgroup

@@ -19,7 +19,7 @@ Mô phỏng hệ điều hành **Simple OS** hỗ trợ lập lịch MLQ đa CPU
      - `VMA 0` (`SMALL`): `[0x00010000, 0x00100000)`, `0 < size <= 512 B`, căn chỉnh `16 B`.
      - `VMA 1` (`MEDIUM`): `[0x00100000, 0x00500000)`, `512 < size <= 4096 B`, căn chỉnh `256 B`.
      - `VMA 2` (`LARGE`): `[0x00500000, 0x01000000)`, `size > 4096 B`, căn chỉnh `4096 B`.
-   - Không gian kernel bắt đầu từ `KERNEL_BASE_ADDR` (mặc định `0xff00000000000000`, có thể cấu hình trong file input).
+   - Không gian kernel bắt đầu từ `KERNEL_BASE_ADDR` (cố định tại `0xff00000000000000` trong `include/mm64.h`; bộ đọc cấu hình hỗ trợ đọc và bỏ qua an toàn dòng `[KERNEL BASE ADDR]` tùy chọn nếu xuất hiện trong file input).
 
 3. **Phân trang 5 cấp (MM64 — `src/mm64.c`, `include/mm64.h`):**
    - Không gian địa chỉ ảo 57-bit (`PGD -> P4D -> PUD -> PMD -> PT`), kích thước trang `4 KB`.
@@ -33,7 +33,7 @@ Mô phỏng hệ điều hành **Simple OS** hỗ trợ lập lịch MLQ đa CPU
    - `pg_getpage()` thực hiện swap theo cơ chế giao dịch (có rollback khi lỗi) và bỏ qua frame đang bị DMA ghim (`!dma_frame_is_pinned(fpn)`).
 
 5. **DMA bất đồng bộ với RTL Co-processor (`src/os.c`, `src/dpi_rtl.cpp`, `src/Vdma_top*.cpp`):**
-   - Tích hợp mô hình phần cứng Verilator (`Vdma_top`), dịch và ghim trang người dùng (`mm64_dma_pin_user_page`).
+   - Tích hợp mô hình phần cứng Verilator (`Vdma_top`), dịch và ghim trang ở cả hai đầu (`mm64_dma_pin_user_page`, `mm64_dma_pin_kernel_page`), hỗ trợ truyền `user -> kernel` với địa chỉ và độ dài căn lề 4 byte (khớp bus RTL `DATA_WIDTH = 32 bit`).
    - Hàng đợi yêu cầu DMA và phát tín hiệu ngắt thật `SIGUSR1` (`cpu_irq_pending`, `dma_handle_pending_irqs`).
 
 ---
@@ -96,4 +96,4 @@ OSSIM_KERNEL_COPY_TEST=1 ./os khoi_kernel_copy_test
 
 - Trường `FPN` trong PTE rộng 13 bit theo định dạng đề bài (tối đa 8192 frame = `32 MiB` RAM với trang `4 KB`).
 - Nhánh swap-in và rollback trong `pg_getpage()` đã hoàn thiện về logic, nhưng `vm_map_ram()` hiện trả lỗi OOM khi hết khung RAM lúc cấp phát mới.
-- Cấu hình biên `input/os_1_mlq_paging_small_1K` có dung lượng RAM (`1024 B`) nhỏ hơn kích thước một trang (`4096 B`), không tạo đủ 1 khung trang nên hệ thống từ chối cấp phát an toàn.
+- Cấu hình biên `input/os_1_mlq_paging_small_1K` có dung lượng RAM (`2048 B`) nhỏ hơn kích thước một trang (`4096 B`), không tạo đủ 1 khung trang nên hệ thống từ chối cấp phát an toàn.

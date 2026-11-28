@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+
+static pthread_mutex_t memphy_fp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  *  MEMPHY_mv_csr - move MEMPHY cursor
@@ -163,13 +166,18 @@ int MEMPHY_get_freefp(struct memphy_struct *mp, addr_t *retfpn)
    if(mp == NULL || retfpn == NULL)
       return -1;
 
+   pthread_mutex_lock(&memphy_fp_lock);
    struct framephy_struct *fp = mp->free_fp_list;
 
    if (fp == NULL)
+   {
+      pthread_mutex_unlock(&memphy_fp_lock);
       return -1;
+   }
 
    *retfpn = fp->fpn;
    mp->free_fp_list = fp->fp_next;
+   pthread_mutex_unlock(&memphy_fp_lock);
 
    free(fp);
 
@@ -216,8 +224,10 @@ int MEMPHY_put_freefp(struct memphy_struct *mp, addr_t fpn)
         return -1;
 
     newnode->fpn = fpn;
+    pthread_mutex_lock(&memphy_fp_lock);
     newnode->fp_next = mp->free_fp_list;
     mp->free_fp_list = newnode;
+    pthread_mutex_unlock(&memphy_fp_lock);
 
     return 0;
 }
