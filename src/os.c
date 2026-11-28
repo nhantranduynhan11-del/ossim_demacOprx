@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -1080,6 +1081,43 @@ static void * ld_routine(void * args) {
 	pthread_exit(NULL);
 }
 
+/*
+ * Parse a config line consisting solely of unsigned integer tokens
+ * (decimal or 0x-prefixed hex). Returns the token count, or -1 if
+ * any non-numeric token is encountered (e.g. a process description line).
+ */
+static int parse_config_ulong_line(const char *line,
+                                   unsigned long *out,
+                                   int max_out)
+{
+	const char *p = line;
+	int count = 0;
+
+	if (p == NULL)
+		return -1;
+
+	while (1) {
+		while (*p != '\0' && isspace((unsigned char)*p))
+			p++;
+		if (*p == '\0')
+			break;
+		if (*p == '-')
+			return -1;
+
+		char *end = NULL;
+		unsigned long long val = strtoull(p, &end, 0);
+		if (end == p || (*end != '\0' && !isspace((unsigned char)*end)))
+			return -1;
+
+		if (count < max_out)
+			out[count] = (unsigned long)val;
+		count++;
+		p = end;
+	}
+
+	return count;
+}
+
 static void read_config(const char * path) {
 	FILE * file;
 	if ((file = fopen(path, "r")) == NULL) {
@@ -1105,21 +1143,14 @@ static void read_config(const char * path) {
 
 #else
     /*
-     * Support both paging configs and legacy scheduler configs.
-     *
-     * Paging format:
-     *   RAM_SIZE SWAP0_SIZE SWAP1_SIZE SWAP2_SIZE SWAP3_SIZE
-     *
-     * Legacy format:
-     *   The process list begins immediately after the header.
+     * Support paging configs (with optional [KERNEL BASE ADDR] line
+     * and 5 or 6 memory values) as well as legacy scheduler configs.
      */
     {
         long config_pos = ftell(file);
         char config_line[256];
-        unsigned long sizes[5];
-        char extra;
-
-        int fields = 0;
+        unsigned long sizes[6];
+        int fields = -1;
 
         if (config_pos < 0) {
             fprintf(stderr, "[CONFIG] Cannot inspect input position\n");
@@ -1127,18 +1158,24 @@ static void read_config(const char * path) {
         }
 
         if (fgets(config_line, sizeof(config_line), file) != NULL) {
-            fields = sscanf(config_line,
-                            "%lu %lu %lu %lu %lu %c",
-                            &sizes[0],
-                            &sizes[1],
-                            &sizes[2],
-                            &sizes[3],
-                            &sizes[4],
-                            &extra);
+            fields = parse_config_ulong_line(config_line, sizes, 6);
+
+            /* Optional standalone [KERNEL BASE ADDR] line (1 numeric token). */
+            if (fields == 1) {
+                config_pos = ftell(file);
+                if (config_pos < 0) {
+                    fprintf(stderr, "[CONFIG] Cannot inspect input position\n");
+                    exit(1);
+                }
+                if (fgets(config_line, sizeof(config_line), file) != NULL)
+                    fields = parse_config_ulong_line(config_line, sizes, 6);
+                else
+                    fields = -1;
+            }
         }
 
-        if (fields == 5 && sizes[0] > 0 && sizes[1] > 0) {
-            /* Explicit paging memory configuration. */
+        if ((fields == 5 || fields == 6) && sizes[0] > 0 && sizes[1] > 0) {
+            /* Explicit paging memory configuration (5 or 6 values). */
             memramsz = sizes[0];
 
             for (sit = 0; sit < PAGING_MAX_MMSWP; sit++)
