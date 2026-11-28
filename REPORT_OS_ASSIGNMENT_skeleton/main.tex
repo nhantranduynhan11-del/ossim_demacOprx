@@ -393,25 +393,147 @@ liballoc: allocated 304 bytes at 0x0000000000010130 for reg_index 4
 	% ===========================================================
 	% 4. QUẢN LÝ BỘ NHỚ ẢO — LINH
 	% ===========================================================
-	\section{Virtual Memory Management}
+    \section{Virtual Memory Management}
+    \subsection{ALLOC và FREE}
+    
+    Trong hệ điều hành mô phỏng, không gian địa chỉ ảo của mỗi tiến trình được quản lý bởi cấu trúc \texttt{struct mm\_struct}, gồm danh sách các vùng nhớ ảo (\texttt{struct vm\_area\_struct}) và bảng ký hiệu vùng nhớ \texttt{symrgtbl[]}.
+    
+    \noindent\textbf{Luồng xử lý ALLOC:}
+    Khi tiến trình gọi \texttt{liballoc()}, hàm xác định \texttt{vmaid} cùng kích thước đã căn chỉnh và chuyển xuống \texttt{\_\_alloc(caller, vmaid, rgid, size, \&alloc\_addr)}. Quy trình bên trong \texttt{\_\_alloc()} gồm:
+    \begin{enumerate}
+        \item \textbf{Tìm vùng trống trong \texttt{vm\_freerg\_list}:} Hàm gọi \texttt{get\_free\_vmrg\_area()} để duyệt danh sách \texttt{cur\_vma->vm\_freerg\_list} của đúng \texttt{vmaid} theo chiến lược First-Fit. Nếu tìm thấy đoạn thỏa mãn ($\texttt{rg\_start} + \texttt{size} \le \texttt{rg\_end}$), hệ thống cắt lấy phần đầu gán cho \texttt{symrgtbl[rgid]} (kèm \texttt{vmaid}), cập nhật phần dư hoặc loại bỏ nút trống mà không cần gọi system call.
+        \item \textbf{Nới \texttt{sbrk} qua \texttt{inc\_vma\_limit()} và ánh xạ trang:} Nếu không tìm thấy vùng trống phù hợp, \texttt{\_\_alloc()} làm tròn kích thước cần nới \texttt{inc\_sz} lên bội số kích thước trang (\texttt{PAGING64\_PAGESZ = 4096 B}), lưu \texttt{old\_sbrk}, rồi gửi yêu cầu \texttt{SYSMEM\_INC\_OP} qua \texttt{\_syscall(caller->krnl, caller->pid, 17, \&regs)}. Tại kernel, \texttt{inc\_vma\_limit()} thực hiện:
+        \begin{itemize}
+            \item Tạo nút vùng mới tại biên \texttt{sbrk} bằng \texttt{get\_vm\_area\_node\_at\_brk()}.
+            \item Kiểm tra không chồng lấn với các VMA khác qua \texttt{validate\_overlap\_vm\_area()}.
+            \item Cấp phát khung trang vật lý và ánh xạ vào bảng trang 5 cấp thông qua \texttt{vm\_map\_ram()}, sau đó cập nhật \texttt{cur\_area->sbrk}.
+        \end{itemize}
+        Khi syscall thành công, đoạn $[\texttt{old\_sbrk}, \texttt{old\_sbrk} + \texttt{size})$ được gán vào \texttt{symrgtbl[rgid]}. Nếu $\texttt{inc\_sz} > \texttt{size}$, phần dư $[\texttt{old\_sbrk} + \texttt{size}, \texttt{old\_sbrk} + \texttt{inc\_sz})$ được gán đúng \texttt{newrg->vmaid = vmaid} và đưa vào danh sách trống qua \texttt{enlist\_vm\_freerg\_list()}.
+    \end{enumerate}
+    
+    \noindent\textbf{Luồng xử lý FREE:}
+    Khi gọi \texttt{\_\_free(caller, vmaid, rgid)}, hệ thống xác thực, kiểm tra \texttt{cur\_vma != NULL} và \texttt{rgnode->vmaid == vmaid}. Nếu vùng nhớ không có khung trang nào bị DMA ghim, vùng $[\texttt{rg\_start}, \texttt{rg\_end})$ được bọc vào nút \texttt{freerg\_node} (gán đúng \texttt{vmaid}) và chèn vào đầu danh sách \texttt{cur\_vma->vm\_freerg\_list} thông qua \texttt{enlist\_vm\_freerg\_list()}. Cuối cùng, mục \texttt{symrgtbl[rgid]} được đặt về trạng thái trống (\texttt{vmaid = -1}, \texttt{rg\_start = rg\_end = 0}).
+    
+    Ngoài ra, theo quy ước khoảng nửa mở $[\texttt{start}, \texttt{end})$, vùng cấm \texttt{\_\_PAGEZERO} ($[\texttt{0x0}, \texttt{0x1000})$) được chặn ngay ở đầu \texttt{pg\_getval()} và \texttt{pg\_setval()} thông qua macro để bổ trợ cho cơ chế chặn ở tầng tra bảng trang của MMU
+    \texttt{PAGING64\_IS\_PAGEZERO\_ADDR(addr)}, 
+    
+    \subsection{Phân vùng theo kích thước}
+    
+    Theo mô hình bố cục bộ nhớ kiểu macOS, \texttt{liballoc()} trong chế độ \texttt{MM64} không cấp phát cố định vào \texttt{vma0} mà gọi \texttt{mm64\_vmaid\_for\_size(size)} để chọn đúng vùng nhớ đích và \texttt{mm64\_align\_size(vmaid, size)} để làm tròn kích thước theo độ căn chỉnh của từng vùng:
+    \begin{itemize}
+        \item \textbf{VMA 0 (\texttt{SMALL}):} Dải $[\texttt{0x00010000}, \texttt{0x00100000})$, áp dụng cho $0 < \text{size} \le 512\text{ B}$, căn chỉnh bội số $16\text{ B}$.
+        \item \textbf{VMA 1 (\texttt{MEDIUM}):} Dải $[\texttt{0x00100000}, \texttt{0x00500000})$, áp dụng cho $512 < \text{size} \le 4096\text{ B}$, căn chỉnh bội số $256\text{ B}$.
+        \item \textbf{VMA 2 (\texttt{LARGE}):} Dải $[\texttt{0x00500000}, \texttt{0x01000000})$, áp dụng cho $\text{size} > 4096\text{ B}$, căn chỉnh bội số $4096\text{ B}$.
+    \end{itemize}
 
-	\subsection{ALLOC và FREE}
-	\viet{Linh}{Luồng ALLOC: tìm vùng trống trong \texttt{vm\_freerg\_list}, không có thì nới \texttt{sbrk} qua \texttt{inc\_vma\_limit}, map trang. Luồng FREE: trả vùng vào danh sách vùng trống.}
+    \begin{figure}[H]
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}[
+        font=\small,
+        >=Stealth,
+        box/.style={draw=black!75, thick, rounded corners=2pt, align=center},
+        mem/.style={draw=black!80, thick, align=center},
+        addr/.style={font=\footnotesize\ttfamily, anchor=west, text=black!85},
+        cond/.style={font=\footnotesize, fill=white, inner sep=2pt, align=center}
+    ]
 
-	\subsection{Phân vùng theo kích thước}
-	\viet{Linh}{\texttt{liballoc} chọn vùng Small, Medium, Large theo size, làm tròn căn chỉnh; \texttt{libfree}, \texttt{libread}, \texttt{libwrite} lấy \texttt{vmaid} từ \texttt{symrgtbl}; \texttt{\_\_free} chỉ chặn khi frame của vùng đang bị DMA ghim.}
+    \def\memx{7.6}
+    \def\memw{6.4}
 
-	\subsection{Trạng thái cấp phát}
-	\viet{Linh}{Bảng hoặc hình trạng thái các vùng sau từng lệnh alloc/free của một test chạy trên bản code cuối.}
+    \draw[mem, fill=red!10] (\memx, 0.0) rectangle (\memx+\memw, 0.85)
+        node[pos=.5] {\footnotesize \texttt{\_\_PAGEZERO} (4 KB) --- Không cho truy cập};
 
-	\subsection{Trả lời câu hỏi}
-	\begin{enumerate}
-	    \item \textbf{What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
-	    \viet{Linh}{Trả lời Q4, liên hệ VMA (phân đoạn) + bảng trang (phân trang) trong code.}
+    \draw[mem, fill=gray!15] (\memx, 0.85) rectangle (\memx+\memw, 1.55)
+        node[pos=.5] {\footnotesize Dự phòng \texttt{\_\_TEXT / \_\_LINKEDIT} (60 KB)};
 
-	    \item \textbf{What are the advantages and disadvantages of paging and contiguous memory allocation?}
-	    \viet{Linh}{Trả lời Q6.}
-	\end{enumerate}
+    \draw[mem, fill=blue!10] (\memx, 1.55) rectangle (\memx+\memw, 3.15)
+        node[pos=.5] {\textbf{VMA 0 (\texttt{SMALL})} --- 960 KB \\ \footnotesize Căn chỉnh: bội số \textbf{16 B}};
+
+    \draw[mem, fill=teal!12] (\memx, 3.15) rectangle (\memx+\memw, 4.75)
+        node[pos=.5] {\textbf{VMA 1 (\texttt{MEDIUM})} --- 4 MB \\ \footnotesize Căn chỉnh: bội số \textbf{256 B}};
+
+    \draw[mem, fill=orange!15] (\memx, 4.75) rectangle (\memx+\memw, 6.35)
+        node[pos=.5] {\textbf{VMA 2 (\texttt{LARGE})} --- 11 MB \\ \footnotesize Căn chỉnh: bội số \textbf{4096 B} (1 trang)};
+
+    \node[font=\bfseries\small, anchor=south] at (\memx+\memw/2, 6.50) {Không gian địa chỉ ảo (User Heap)};
+
+    \node[addr] at (\memx+\memw+0.12, 0.00) {0x00000000};
+    \node[addr] at (\memx+\memw+0.12, 0.85) {0x00001000};
+    \node[addr] at (\memx+\memw+0.12, 1.55) {0x00010000};
+    \node[addr] at (\memx+\memw+0.12, 3.15) {0x00100000};
+    \node[addr] at (\memx+\memw+0.12, 4.75) {0x00500000};
+    \node[addr] at (\memx+\memw+0.12, 6.35) {0x01000000};
+
+    \node[box, fill=gray!8, minimum width=3.1cm, minimum height=1.5cm] (alloc) at (1.55, 3.95) {
+        \textbf{\texttt{liballoc(size)}} \\[3pt]
+        \scriptsize \texttt{mm64\_vmaid\_for\_size()} \\
+        \scriptsize \texttt{mm64\_align\_size()}
+    };
+
+    \coordinate (branch) at (3.65, 3.95);
+    \draw[thick] (alloc.east) -- (branch);
+
+    \draw[->, thick, orange!70!black] (branch) |- (\memx, 5.55)
+        node[cond, pos=0.75, above=2pt] {$\mathrm{size} > 4096$\,B};
+
+    \draw[->, thick, teal!75!black] (branch) -- (\memx, 3.95)
+        node[cond, pos=0.50, above=2pt] {$512 < \mathrm{size} \le 4096$\,B};
+
+    \draw[->, thick, blue!70!black] (branch) |- (\memx, 2.35)
+        node[cond, pos=0.75, above=2pt] {$0 < \mathrm{size} \le 512$\,B};
+    
+    \end{tikzpicture}%
+    }
+    \caption{Cơ chế phân loại và căn chỉnh kích thước vào ba vùng nhớ ảo trong \texttt{liballoc()}}
+    \label{fig:vma_size_partition}
+    \end{figure}
+    
+    
+    Vì mỗi biến có thể nằm ở một VMA khác nhau, các hàm \texttt{libfree()}, \texttt{libread()} và \texttt{libwrite()} đều bỏ việc truyền cứng \texttt{vmaid = 0}. Thay vào đó, các hàm này tra cứu \texttt{rgnode = get\_symrg\_byid(proc->mm, reg\_index)}, kiểm tra tính hợp lệ ($\texttt{rgnode->vmaid} \ge 0$, $\texttt{rg\_start} < \texttt{rg\_end}$) rồi truyền đúng \texttt{rgnode->vmaid} xuống \texttt{\_\_free()}, \texttt{\_\_read()} và \texttt{\_\_write()}. Đồng thời, \texttt{enlist\_vm\_freerg\_list()} cũng tra đúng VMA theo \texttt{rg\_elmt->vmaid} để tránh trộn lẫn vùng trống giữa các phân vùng.
+    
+    \noindent\textbf{Bảo vệ khung trang đang bị DMA ghim trong \texttt{\_\_free()}:}
+    Để đảm bảo tính bất đồng bộ giữa CPU và bộ điều khiển DMA, \texttt{\_\_free()} không bị chặn toàn cục khi hệ thống có tác vụ DMA đang chạy. Thay vào đó, hàm chỉ duyệt các trang ảo thuộc chính vùng cần giải phóng từ \texttt{PAGING64\_PGN(rgnode->rg\_start)} đến \texttt{PAGING64\_PGN(rgnode->rg\_end - 1)}; với mỗi trang đang hiện diện trong RAM, hàm kiểm tra \texttt{dma\_frame\_is\_pinned}. Nếu có khung trang đang bị ghim, \texttt{\_\_free()} trả về \texttt{-1} để ngăn lỗi ghi đè dữ liệu (use-after-free), trong khi vẫn cho phép giải phóng bình thường các vùng nhớ không liên quan đến DMA.
+    
+    \subsection{Trạng thái cấp phát}
+    Bảng sau trình bày trạng thái các vùng nhớ (tương ứng với các trường \texttt{sbrk} và \texttt{free} trên dòng log \texttt{[LAYOUT]} của \texttt{print\_mm\_layout()}) sau một chuỗi lệnh \texttt{alloc}/\texttt{free} kiểm thử tại các ngưỡng phân vùng ($512\text{ B}$, $513\text{ B}$, $4097\text{ B}$) và thao tác giải phóng -- cấp phát lại.
+    
+    \begin{table}[H]
+    \centering
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \caption{Trạng thái các vùng nhớ ảo sau từng lệnh \texttt{alloc}/\texttt{free}}
+    \label{tab:alloc_trace}
+    \begin{tabularx}{\textwidth}{@{}clccc>{\raggedright\arraybackslash}X@{}}
+    \toprule
+    \textbf{Bước} & \textbf{Lệnh} & \textbf{VMA} & \textbf{Căn chỉnh} & \textbf{Vùng cấp phát} & \textbf{Trạng thái \texttt{sbrk} \& \texttt{freerg\_list}} \\ \midrule
+    1 & \texttt{alloc 512 0}  & \texttt{vma0} (SMALL)  & 512 B  & \texttt{[0x10000, 0x10200)}  & \texttt{sbrk=0x11000}; dư \texttt{[0x10200, 0x11000)} \\
+    2 & \texttt{alloc 513 1}  & \texttt{vma1} (MEDIUM) & 768 B  & \texttt{[0x100000, 0x100300)} & \texttt{sbrk=0x101000}; dư \texttt{[0x100300, 0x101000)} \\
+    3 & \texttt{alloc 4097 2} & \texttt{vma2} (LARGE)  & 8192 B & \texttt{[0x500000, 0x502000)} & \texttt{sbrk=0x502000}; \texttt{freerg\_list} rỗng \\
+    4 & \texttt{free 0}       & \texttt{vma0} (SMALL)  & --     & Thu hồi \texttt{reg 0}        & Đưa \texttt{[0x10000, 0x10200)} vào list \texttt{vma0} \\
+    5 & \texttt{alloc 256 3}  & \texttt{vma0} (SMALL)  & 256 B  & \texttt{[0x10000, 0x10100)}  & Tái sử dụng list (không tăng \texttt{sbrk}) \\ \bottomrule
+    \end{tabularx}
+    \end{table}
+    
+    Kết quả xác nhận các kích thước biên rơi đúng vào ba VMA tương ứng, kích thước được làm tròn chuẩn theo quantum ($16\text{ B}$, $256\text{ B}$, $4096\text{ B}$), và ở bước 5 lệnh \texttt{alloc 256 3} đã tái sử dụng trực tiếp đoạn trống từ \texttt{vm\_freerg\_list} của \texttt{vma0} mà không cần gọi \texttt{SYSCALL 17} để nới \texttt{sbrk}.
+    
+    \subsection{Trả lời câu hỏi}
+    \begin{enumerate}
+        \item \textbf{What is the primary motivation for combining segmentation with paging in memory management? How does this hybrid approach address limitations inherent in using either technique alone?}
+    
+        Segmentation tổ chức bộ nhớ theo cấu trúc logic của chương trình và hỗ trợ phân quyền bảo vệ thuận tiện ở mức từng đoạn, nhưng gây \textit{phân mảnh ngoại vi} do mỗi đoạn có kích thước thay đổi và đòi hỏi không gian vật lý liên tục. Ngược lại, phân trang (paging) chia bộ nhớ thành các trang kích thước cố định giúp loại bỏ phân mảnh ngoại vi, nhưng không phản ánh ranh giới logic của dữ liệu. Kết hợp phân đoạn với phân trang giữ được khả năng phân tách logic và bảo vệ theo vùng của phân đoạn, đồng thời chia nhỏ mỗi đoạn thành các trang cố định để ánh xạ rời rạc vào RAM vật lý, khắc phục triệt để phân mảnh ngoại vi.
+    
+        \textit{Liên hệ trong code:} Lớp phân đoạn được hiện thực bằng danh sách \texttt{vm\_area\_struct} theo mô hình macOS: tách biệt vùng cấm \texttt{\_\_PAGEZERO}, ba vùng heap người dùng (\texttt{vma0} SMALL, \texttt{vma1} MEDIUM, \texttt{vma2} LARGE) và vùng kernel từ \texttt{KERNEL\_BASE\_ADDR}. Bên dưới mỗi VMA, khi \texttt{inc\_vma\_limit()} nới \texttt{sbrk}, hàm \texttt{vm\_map\_ram()} chia đoạn ảo thành các trang $4\text{ KB}$ và ánh xạ qua bảng trang 5 cấp tới các khung trang vật lý bất kỳ từ \texttt{MEMPHY\_get\_freefp()}, vừa giữ được cấu trúc vùng theo kích thước vừa không cần tìm khối RAM vật lý liên tục lớn.
+    
+        \item \textbf{What are the advantages and disadvantages of paging and contiguous memory allocation?}
+
+        \begin{itemize}
+            \item \textbf{Phân trang (Paging):} \textit{Ưu điểm} là loại bỏ hoàn toàn phân mảnh ngoại vi, hỗ trợ mở rộng không gian địa chỉ động mà không cần di dời tiến trình và dễ triển khai bộ nhớ ảo/swapping từng trang. \textit{Nhược điểm} là phát sinh phân mảnh nội vi ở trang cuối mỗi lần nới, tốn bộ nhớ lưu bảng trang và tốn thêm chu kỳ truy cập bộ nhớ để dịch địa chỉ.
+            \item \textbf{Cấp phát liên tục (Contiguous Allocation):} \textit{Ưu điểm} là tốc độ dịch địa chỉ rất nhanh (chỉ cần thanh ghi nền \texttt{base} và giới hạn \texttt{limit}), không tốn dung lượng bảng trang. \textit{Nhược điểm} là phân mảnh ngoại vi nghiêm trọng và khó mở rộng vùng nhớ khi tiến trình đang chạy.
+        \end{itemize}
+    
+        \textit{Liên hệ trong code:} Không gian người dùng áp dụng phân trang 5 cấp (MM64) nên \texttt{\_\_alloc()} và \texttt{pg\_getpage()} có thể cấp phát và hoán đổi linh hoạt từng trang $4\text{ KB}$ giữa \texttt{mram} và \texttt{active\_mswp}, chấp nhận phần phân mảnh nội khi làm tròn \texttt{inc\_sz} lên bội số $4\text{ KB}$ (phần dư được tận dụng lại qua \texttt{vm\_freerg\_list}) và chi phí tra bảng trang 5 cấp. Ngược lại, bộ điều khiển DMA yêu cầu địa chỉ vật lý liên tục trong phạm vi truyền nên hệ thống phải bổ sung bước dịch và ghim trang (\texttt{mm64\_dma\_pin\_user\_page}), phản ánh rõ sự đánh đổi giữa tính linh hoạt của phân trang và hiệu năng truy cập trực tiếp của cấp phát liên tục.
+    \end{enumerate}
 
 	% ===========================================================
 	% 5. PHÂN TRANG ĐA CẤP — NHÂN
@@ -822,7 +944,42 @@ CPU 0: Processed  1 has finished
 	% 9. KẾT LUẬN — LINH
 	% ===========================================================
 	\section{Kết luận}
-	\viet{Linh}{Những gì nhóm đã làm được, hạn chế, hướng mở rộng.}
+	\subsection*{Kết quả đạt được}
+    Qua quá trình thiết kế và hiện thực, nhóm đã hoàn thành đầy đủ các phần cốt lõi của hệ điều hành mô phỏng \texttt{ossim\_demacOprx} theo đúng yêu cầu của bài tập lớn như sau:
+    \begin{itemize}
+        \item \textbf{Bộ lập lịch (MLQ Scheduler):} Hiện thực hoàn chỉnh \texttt{enqueue()}, \texttt{dequeue()} và \texttt{get\_mlq\_proc()} với cơ chế cấp phát \texttt{slot} theo độ ưu tiên, hoạt động ổn định trên môi trường đa CPU.
+        \item \textbf{Quản lý bộ nhớ kiểu macOS và phân trang 5 cấp 64-bit:} Tổ chức không gian người dùng gồm vùng bảo vệ \texttt{\_\_PAGEZERO} và ba vùng \texttt{SMALL}/\texttt{MEDIUM}/\texttt{LARGE} với mức căn chỉnh riêng biệt; triển khai bảng trang 5 cấp cấp phát theo nhu cầu (demand allocation) giúp tiết kiệm đáng kể bộ nhớ bảng trang.
+        \item \textbf{Tách biệt User/Kernel Space:} Đảm bảo tiến trình người dùng chỉ giao tiếp với kernel qua System Call truyền \texttt{PID}, chặn truy cập trực tiếp vào vùng kernel và thực hiện sao chép an toàn qua \texttt{copy\_from\_user()} / \texttt{copy\_to\_user()}.
+        \item \textbf{Đồng xử lý DMA bất đồng bộ và đồng bộ hóa:} Tích hợp thành công bộ điều khiển DMA thực chạy qua Verilator, cho phép CPU tiếp tục thực thi sau khi giao việc và xử lý sự kiện hoàn tất bằng ngắt \texttt{SIGUSR1}; đồng thời bảo vệ an toàn các khung trang đang truyền dữ liệu bằng cơ chế ghim trang (\texttt{pin/unpin}) trong cả \texttt{\_\_free()} và thuật toán thay trang.
+    \end{itemize}
+
+    Đóng góp chính về quản lý bộ nhớ là việc thay thế bố cục kiểu Linux, vốn dùng một vùng heap duy nhất, bằng bố cục kiểu macOS. Không gian địa chỉ ảo được chia thành ba vùng \texttt{SMALL}, \texttt{MEDIUM} và \texttt{LARGE}, mỗi vùng phục vụ một nhóm kích thước và có hệ số căn chỉnh riêng (16 B, 256 B và 4096 B). Vùng \texttt{\_\_PAGEZERO} ở đầu không gian địa chỉ không thuộc VMA nào và bị chặn ngay ở bước tra bảng trang, nên mọi truy cập qua con trỏ rỗng đều bị phát hiện thay vì âm thầm đọc ghi sai dữ liệu. Thiết kế này mang lại hai lợi ích. Các yêu cầu cùng cỡ được gom về cùng một vùng với cùng đơn vị căn chỉnh, nên các khoảng trống sinh ra có kích thước tương đồng và dễ được tái sử dụng. Vùng \texttt{LARGE} căn theo trang và liên tục, phù hợp với việc DMA sao chép nguyên một khối dữ liệu lớn.
+
+    Ở mức hiện thực, các thao tác \texttt{ALLOC}, \texttt{FREE}, \texttt{READ} và \texttt{WRITE} được viết lại để làm việc theo từng vùng thay vì mặc định vùng 0. Vùng nhớ nào được cấp ở VMA nào đều được ghi lại trong bảng ký hiệu của tiến trình, và các thao tác sau đó đọc mã vùng từ chính bảng này. Danh sách vùng trống được quản lý riêng cho từng VMA, còn việc chọn vùng dựa trên kích thước yêu cầu.
+    
+    Ở các thành phần còn lại, bộ lập lịch MLQ, bảng trang nhiều cấp cho không gian địa chỉ 64 bit, giao tiếp giữa tiến trình và nhân qua lời gọi hệ thống và cơ chế hoán đổi trang đã được ghép thành một hệ thống chạy thống nhất. Bộ đồng xử lý DMA nhận việc, chạy độc lập, rồi báo hoàn tất bằng tín hiệu \texttt{SIGUSR1} để trình xử lý ngắt hoàn tất công việc. CPU không phải chờ trong lúc DMA chạy. Chính điểm này thể hiện tính bất đồng bộ mà đề bài yêu cầu. Cơ chế đồng bộ hóa chỉ được dùng để bảo vệ các tài nguyên dùng chung, chứ không để chặn CPU.
+    
+    \subsection*{Hạn chế}
+    
+    Hệ thống vẫn còn một số giới hạn sau:
+    \begin{itemize}
+        \item \textbf{Kích thước vùng nhớ cố định:} Kích thước của ba vùng được ấn định từ đầu, nên khi một vùng đầy, yêu cầu cấp phát thuộc nhóm đó sẽ thất bại dù vùng bên cạnh vẫn còn chỗ trống.
+        \item \textbf{Phân mảnh bộ nhớ:} Danh sách vùng trống chưa gộp các khoảng trống liền kề, dẫn đến phân mảnh ngoài sau nhiều lần cấp phát và giải phóng (một yêu cầu lớn có thể thất bại dù tổng dung lượng trống đủ). Ngoài ra, việc làm tròn lên theo đơn vị căn chỉnh cũng gây phân mảnh trong, tuy nhỏ ở vùng \texttt{SMALL} nhưng có thể lên tới gần một trang ở vùng \texttt{LARGE}.
+        \item \textbf{Thuật toán thay trang đơn giản:} Thuật toán chọn trang nạn nhân hiện dùng là FIFO, dễ cài đặt nhưng không xét đến mức độ sử dụng thực tế của trang.
+        \item \textbf{Hạn chế về đồng bộ và vùng nhớ nhân:} Các thao tác cấp phát, giải phóng và truy cập đang dùng chung một khóa toàn cục; điều này đảm bảo tính đúng đắn nhưng hạn chế khả năng chạy song song giữa các tiến trình. Bên cạnh đó, nhân hệ điều hành vẫn chỉ sử dụng một VMA duy nhất.
+    \end{itemize}
+    
+    \subsection*{Hướng phát triển}
+    
+    Từ những hạn chế trên, hệ thống có thể được cải tiến theo bốn hướng:
+    \begin{itemize}
+        \item \textbf{Về cấp phát:} Bổ sung cơ chế gộp các vùng trống liền kề và áp dụng chiến lược chọn vùng tốt hơn (\textit{best-fit} hoặc danh sách trống tách theo kích thước), đồng thời cho phép chuyển yêu cầu sang vùng lân cận khi vùng chính đã đầy.
+        \item \textbf{Về thay trang:} Thay thế thuật toán FIFO bằng LRU hoặc Clock nhằm giảm số lần hoán đổi trang không cần thiết.
+        \item \textbf{Về đồng bộ:} Thay khóa toàn cục bằng khóa theo từng VMA hoặc theo từng tiến trình để các tiến trình độc lập không phải chờ nhau.
+        \item \textbf{Về DMA và không gian nhân:} Hỗ trợ nhiều kênh DMA hoạt động song song và áp dụng cùng ý tưởng phân vùng theo kích thước cho cả không gian nhân.
+    \end{itemize}
+    
+    Những cải tiến này không làm thay đổi kiến trúc đã xây dựng, mà chỉ phát triển tiếp trên nền tảng đó.
 
 	% ===========================================================
 	% TÀI LIỆU THAM KHẢO
